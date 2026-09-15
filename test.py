@@ -1,29 +1,11 @@
 
-from playwright.async_api import async_playwright
-import asyncio
-
+## Test the LLM
 local_path = "./models/gemma-4-E2B-it"
-
 
 from modules.llm import LLM
 
 llm = LLM(model=None, processor=None)
 llm.load_model(local_path)
-
-
-# Async
-
-async def main():
-    async with async_playwright() as p:
-        browser = await p.firefox.launch(headless=True)
-        page = await browser.new_page()
-        
-        await page.goto("https://example.com")
-        await page.screenshot(path="example.png")
-        
-        await browser.close()
-
-asyncio.run(main())
 
 # Prompt
 messages = [
@@ -35,3 +17,9 @@ response = llm.gen_text(messages)
 
 # Parse output
 print(response)
+
+# Test the Playwright Browser
+from modules.browser import Browser
+
+browser = Browser()
+browser.test_browser()
