@@ -4,7 +4,7 @@ local_path = "./models/gemma-4-E2B-it"
 
 from modules.llm import LLM
 
-llm = LLM(model=None, processor=None)
+llm = LLM()
 llm.load_model(local_path)
 
 # Prompt

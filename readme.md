@@ -10,3 +10,11 @@ playwright install chromium
 # Run this every time
 
 source .venv/bin/activate
+
+# Testing Env
+
+python3 test.py
+
+# Running Boxxy
+
+python3 boxxy.py
