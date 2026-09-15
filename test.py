@@ -1,16 +1,29 @@
-from transformers import AutoProcessor, AutoModelForMultimodalLM
+
+from playwright.async_api import async_playwright
+import asyncio
 
 local_path = "./models/gemma-4-E2B-it"
 
-# Load model
-processor = AutoProcessor.from_pretrained(local_path)
-model = AutoModelForMultimodalLM.from_pretrained(
-    local_path,
-    dtype="auto",
-    device_map="auto"
-)
 
-model = model.to("mps")
+from modules.llm import LLM
+
+llm = LLM(model=None, processor=None)
+llm.load_model(local_path)
+
+
+# Async
+
+async def main():
+    async with async_playwright() as p:
+        browser = await p.firefox.launch(headless=True)
+        page = await browser.new_page()
+        
+        await page.goto("https://example.com")
+        await page.screenshot(path="example.png")
+        
+        await browser.close()
+
+asyncio.run(main())
 
 # Prompt
 messages = [
@@ -18,20 +31,7 @@ messages = [
     {"role": "user", "content": "Write a poem about filling forms."},
 ]
 
-# Process input
-text = processor.apply_chat_template(
-    messages, 
-    tokenize=False, 
-    add_generation_prompt=True, 
-    enable_thinking=False
-)
-inputs = processor(text=text, return_tensors="pt").to(model.device)
-input_len = inputs["input_ids"].shape[-1]
-
-# Generate output
-outputs = model.generate(**inputs, max_new_tokens=1024)
-response = processor.decode(outputs[0][input_len:], skip_special_tokens=False)
+response = llm.gen_text(messages)
 
 # Parse output
-out_text = processor.parse_response(response)
-print(out_text)
+print(response)
