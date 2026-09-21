@@ -1,6 +1,5 @@
 from transformers import AutoProcessor, AutoModelForMultimodalLM
 
-
 class LLM:
     def __init__(self):
         self.model = None
@@ -18,9 +17,10 @@ class LLM:
         self.model = model
         self.processor = processor
 
-    def gen_text(self, input_text):
+    def gen_text(self, input_text, tools_schema=None):
         text = self.processor.apply_chat_template(
             input_text,
+            tools=tools_schema,
             tokenize=False,
             add_generation_prompt=True,
             enable_thinking=False

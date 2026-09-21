@@ -8,7 +8,7 @@ print("----")
 print("## --> Mode 1 : Boxxy will visit pages and receive content in a manner similiar to a screen reader.")
 print("## --> Mode 2 : Boxxy will take screenshots of the page, and analyze the visual content then interact accordingly.")
 print("----")
-mode = input("What mode of Boxxy would you like to use? (1/2/3)")
+mode = input("What mode of Boxxy would you like to use? (1 or 2)")
 
 if mode == "1":
     print("You have selected Mode 1: Boxxy will visit pages and receive content in a manner similiar to a screen reader.")
