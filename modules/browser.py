@@ -12,15 +12,14 @@ class Browser:
     def open(self):
         self.playwright = sync_playwright().start()
         self.browser = self.playwright.chromium.launch(headless=True)
-        page = self.browser.new_page()
-        page.goto(self.base_url)
+        self.page = self.browser.new_page()
+        self.page.goto(self.base_url)
 
-    def explore_html(self):
+    def explore_view(self):
         if self.browser is None:
             raise Exception("Browser is not open. Call open() first.")
-        page = self.browser.new_page()
-        page.goto(self.base_url)
-        return page.content()
+        self.page.wait_for_load_state('networkidle')
+        return self.page.aria_snapshot()
 
     def test_browser(self):
         async def run():

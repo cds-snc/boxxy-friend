@@ -1,7 +1,7 @@
 class Mode1:
     def __init__(self, test_url, local_path):
         self.test_url = test_url
-        self.test_behavior = "You are an automated testing agent, your goal is to identify issues and ensure the web page functions correctly."
+        self.test_behavior = "You are an automated testing agent mimicking a user utilizing a screen reader. Your goal is to test the application for accessibility and functionality."
 
         # Initialize notes to keep track of observations during exploration.
         self.notes = []
@@ -17,10 +17,12 @@ class Mode1:
         self.browser.open()
 
     def explore(self):
-        content = self.browser.explore_html()
+        content = self.browser.explore_view()
+        print(content)
 
         messages = [
             {"role": "system", "content": self.test_behavior},
+            {"role": "user", "content" : "The following is the ARIA snapshot of the page:"},
             {"role": "user", "content": content},
         ]
 
