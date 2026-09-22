@@ -21,6 +21,11 @@ class Browser:
         self.page.wait_for_load_state('networkidle')
         return self.page.aria_snapshot()
 
+    def click(self, element):
+        if self.browser is None:
+            raise Exception("Browser is not open. Call open() first.")
+        self.page.click(element)
+
     def test_browser(self):
         async def run():
             async with async_playwright() as p:

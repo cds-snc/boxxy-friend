@@ -22,17 +22,17 @@ class Mode1:
             {
                 "type": "function",
                 "function": {
-                    "name": "perform_action",
-                    "description": "Perform an action on the web page.",
+                    "name": "perform_click",
+                    "description": "Perform a click action on the web page.",
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "instructions": {
+                            "element": {
                                 "type": "string",
-                                "description": "The instructions for the action to be performed on the web page."
+                                "description": "The element on the web page to be clicked."
                             }
                         },
-                        "required": ["instructions"]
+                        "required": ["element"]
                     }
                 }
             }
@@ -55,9 +55,10 @@ class Mode1:
         ]
 
         response = self.llm.gen_text(messages, self.tools_schema)
-        self.notes.append(response)
-    def perform_action(self, instructions):
-        print("The LLM asked to do...", instructions)
+
+        print(response)
+    def perform_click(self, instructions):
+        self.browser.click(instructions["element"])
 
     def report(self):
         print("Report:")

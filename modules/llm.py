@@ -26,8 +26,20 @@ class LLM:
             enable_thinking=False
         )
         inputs = self.processor(text=text, return_tensors="pt").to(self.model.device)
-        input_len = inputs["input_ids"].shape[-1]
+        input_len = inputs["input_ids"].shape[1]
 
         outputs = self.model.generate(**inputs, max_new_tokens=1024)
         response = self.processor.decode(outputs[0][input_len:], skip_special_tokens=False)
-        return self.processor.parse_response(response)
+
+        parsed_response = self.processor.parse_response(response)
+
+        thoughts = parsed_response.get("thinking", "")
+        text = parsed_response.get("content", "")
+        tool_calls = parsed_response.get("tool_calls", [])
+
+        return {
+            "raw": response,
+            "thoughts": thoughts,
+            "text": text,
+            "tool_calls": tool_calls
+        }
