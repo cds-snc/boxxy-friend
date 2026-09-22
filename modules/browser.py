@@ -1,6 +1,7 @@
 
 from playwright.async_api import async_playwright
 import asyncio
+import re
 from playwright.sync_api import sync_playwright
 
 class Browser:
@@ -21,16 +22,27 @@ class Browser:
         self.page.wait_for_load_state('networkidle')
         return self.page.aria_snapshot()
 
+    # Matches ARIA snapshot node lines like: button "Design a form Start with a blank form."
+    _ROLE_NAME_RE = re.compile(r'^\s*([a-zA-Z]+)\s+"(.*)"\s*$')
+
     def click(self, element):
         if self.browser is None:
             raise Exception("Browser is not open. Call open() first.")
 
-        # element might return as the text of the element, or a format like...
-        # eg: button "Submit"
-
-        if element.startswith('button '):
-            element = element.split(' ', 1)[1].strip('"')
-            element = f'"{element}"'
+        # `element` is typically a line from the ARIA tree/snapshot, e.g.:
+        #   button "Design a form Start with a blank form."
+        # The quoted text is the *accessible name*, which is computed by
+        # concatenating descendant text nodes (often inserting spaces that
+        # don't exist verbatim in the DOM). get_by_text() matches literal
+        # rendered text, so it can fail on composite names like this.
+        # get_by_role() matches on the accessible name using the same
+        # algorithm the ARIA tree uses, so prefer it when we have a role.
+        match = self._ROLE_NAME_RE.match(element)
+        if match:
+            role, name = match.group(1), match.group(2)
+            print(f'Clicking on role "{role}" with name "{name}"')
+            self.page.get_by_role(role, name=name).click()
+            return
 
         print("Clicking on element with text:", element)
         self.page.get_by_text(element).click()

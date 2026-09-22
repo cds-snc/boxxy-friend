@@ -8,10 +8,14 @@ class Mode1:
         "You are testing GC Forms, a product for creating and managing web forms." \
         "Simulate developing a complex web form with various input types and validation rules." \
         "Be curious, explore, and provide feedback on your findings." \
-        "Always perform an action until your task is completed."
+        "Always perform an action until your task is completed." \
+        "When you call the perform_click tool, the 'element' argument MUST be copied verbatim from the ARIA " \
+        "snapshot you were given, in the exact form <role> \"<accessible name>\" (for example: " \
+        "button \"Design a form Start with a blank form.\"). Use the full accessible name exactly as it appears " \
+        "in the snapshot, including any text contributed by child elements. Never paraphrase, shorten, or " \
+        "reword the accessible name, and never invent an element that is not present in the snapshot."
 
         # Initialize notes to keep track of observations during exploration.
-        self.notes = []
         self.messages = []
 
         from modules.browser import Browser
@@ -32,7 +36,12 @@ class Mode1:
                         "properties": {
                             "element": {
                                 "type": "string",
-                                "description": "The element's ARIA label on the web page to be clicked."
+                                "description": "The exact line for the target element as it appears verbatim in the "
+                                    "ARIA snapshot, in the form <role> \"<accessible name>\" (e.g. button \"Design a "
+                                    "form Start with a blank form.\"). Copy the role and full quoted accessible name "
+                                    "character-for-character from the snapshot, including any inner text from child "
+                                    "elements. Do not paraphrase, summarize, truncate, or invent text that isn't in "
+                                    "the snapshot."
                             }
                         },
                         "required": ["element"]
@@ -51,18 +60,26 @@ class Mode1:
 
         print(f"{response['text']}\r", flush=True)
         
-        self.notes.append(response['text'])
         tools_used = False
 
+        ## Remove the last two messages to avoid redundancy in the conversation history
+        if len(self.messages) > 2:
+            self.messages = self.messages[:-2]
+
+        ## Append the latest user message to the conversation history
+        self.messages.append({"role": "model", "content": response['text']})
+
+        ## Do any tool calls.
         for tool_call in response['tool_calls']:
             tools_used = True
             print(tool_call)
             if tool_call['function']['name'] == 'perform_click':
                 self.perform_click(tool_call['function']['arguments'])
-                print(f"Performed click on element: {tool_call['function']['arguments']['element']}\r", flush=True)
         
         if tools_used:
             self.continue_explore()
+        else:
+            self.report()
 
     def explore(self):
         content = self.browser.explore_view()
@@ -88,6 +105,7 @@ class Mode1:
         self.browser.click(instructions["element"])
 
     def report(self):
-        print("Report:")
-        for note in self.notes:
-            print(note)
+        self.messages.append({"role": "user", "content": "Please provide a final report based on the exploration."})
+        
+        response = self.llm.gen_text(self.messages, self.tools_schema)
+        print(f"{response['text']}\r", flush=True)
