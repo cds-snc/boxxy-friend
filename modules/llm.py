@@ -1,4 +1,7 @@
+import re
+
 from transformers import AutoProcessor, AutoModelForMultimodalLM
+from transformers.utils.chat_parsing_utils import recursive_parse
 
 class LLM:
     def __init__(self):
@@ -36,6 +39,22 @@ class LLM:
         thoughts = parsed_response.get("thinking", "")
         text = parsed_response.get("content", "")
         tool_calls = parsed_response.get("tool_calls", [])
+
+        # The shipped response_schema's top-level regex only recognizes a tool
+        # call when it immediately follows the thinking block, so when the
+        # model emits free text before the tool call, `content` swallows the
+        # raw <|tool_call>...<tool_call|> markup and `tool_calls` ends up
+        # empty. Re-run just the tool_calls sub-schema against the raw
+        # response (its regex searches anywhere in the text) and strip the
+        # matched markup back out of `text`.
+        if not tool_calls:
+            schema = getattr(self.processor.tokenizer, "response_schema", None)
+            tool_calls_schema = (schema or {}).get("properties", {}).get("tool_calls")
+            if tool_calls_schema:
+                tool_calls = recursive_parse(response, tool_calls_schema) or []
+                tool_call_pattern = tool_calls_schema.get("x-regex-iterator")
+                if tool_calls and tool_call_pattern:
+                    text = re.sub(tool_call_pattern, "", text, flags=re.DOTALL).strip()
 
         return {
             "raw": response,

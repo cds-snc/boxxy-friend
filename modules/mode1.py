@@ -6,7 +6,9 @@ class Mode1:
         self.test_behavior = "You are an automated testing agent mimicking a user utilizing a screen reader. " \
         "Your goal is to test the whole application for accessibility and functionality." \
         "You are testing GC Forms, a product for creating and managing web forms." \
-        "Simulate developing a complex web form with various input types and validation rules."
+        "Simulate developing a complex web form with various input types and validation rules." \
+        "Be curious, explore, and provide feedback on your findings." \
+        "Always perform an action until your task is completed."
 
         # Initialize notes to keep track of observations during exploration.
         self.notes = []
