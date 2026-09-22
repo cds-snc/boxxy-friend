@@ -12,6 +12,7 @@ class Mode1:
 
         # Initialize notes to keep track of observations during exploration.
         self.notes = []
+        self.messages = []
 
         from modules.browser import Browser
         self.browser = Browser(self.test_url)
@@ -31,7 +32,7 @@ class Mode1:
                         "properties": {
                             "element": {
                                 "type": "string",
-                                "description": "The element on the web page to be clicked."
+                                "description": "The element's ARIA label on the web page to be clicked."
                             }
                         },
                         "required": ["element"]
@@ -45,20 +46,44 @@ class Mode1:
     def launch(self):
         self.browser.open()
 
+    def llm_access_content(self):
+        response = self.llm.gen_text(self.messages, self.tools_schema)
+
+        print(f"{response['text']}\r", flush=True)
+        
+        self.notes.append(response['text'])
+        tools_used = False
+
+        for tool_call in response['tool_calls']:
+            tools_used = True
+            print(tool_call)
+            if tool_call['function']['name'] == 'perform_click':
+                self.perform_click(tool_call['function']['arguments'])
+                print(f"Performed click on element: {tool_call['function']['arguments']['element']}\r", flush=True)
+        
+        if tools_used:
+            self.continue_explore()
+
     def explore(self):
         content = self.browser.explore_view()
-        print(content)
 
-        messages = [
+        self.messages = [
             {"role": "system", "content": self.test_behavior},
             {"role":"user", "content": "Please develop a complex form that includes various input types and validation rules on the quality of pastas."},
             {"role": "user", "content" : "The following is the ARIA snapshot of the page:"},
             {"role": "user", "content": content},
         ]
 
-        response = self.llm.gen_text(messages, self.tools_schema)
+        self.llm_access_content()
 
-        print(response)
+    def continue_explore(self):
+        content = self.browser.explore_view()
+
+        self.messages.append({"role": "user", "content": "The following is the ARIA snapshot of the page:"})
+        self.messages.append({"role": "user", "content": content})
+
+        self.llm_access_content()
+
     def perform_click(self, instructions):
         self.browser.click(instructions["element"])
 

@@ -24,7 +24,16 @@ class Browser:
     def click(self, element):
         if self.browser is None:
             raise Exception("Browser is not open. Call open() first.")
-        self.page.click(element)
+
+        # element might return as the text of the element, or a format like...
+        # eg: button "Submit"
+
+        if element.startswith('button '):
+            element = element.split(' ', 1)[1].strip('"')
+            element = f'"{element}"'
+
+        print("Clicking on element with text:", element)
+        self.page.get_by_text(element).click()
 
     def test_browser(self):
         async def run():
