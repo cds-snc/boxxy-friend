@@ -56,15 +56,20 @@ class Mode1:
         self.browser.open()
 
     def llm_access_content(self):
-        response = self.llm.gen_text(self.messages, self.tools_schema)
+        content = self.browser.explore_view()
 
-        print(f"{response['text']}\r", flush=True)
+        messages_with_snapshot = self.messages + [
+            {"role": "user", "content" : "The following is the ARIA snapshot of the page:"},
+            {"role": "user", "content": content},
+        ] 
+
+        print(content)
+
+        response = self.llm.gen_text(messages_with_snapshot, self.tools_schema)
+
+        print(f"{response['text']}")
         
         tools_used = False
-
-        ## Remove the last two messages to avoid redundancy in the conversation history
-        if len(self.messages) > 2:
-            self.messages = self.messages[:-2]
 
         ## Append the latest user message to the conversation history
         self.messages.append({"role": "model", "content": response['text']})
@@ -82,23 +87,14 @@ class Mode1:
             self.report()
 
     def explore(self):
-        content = self.browser.explore_view()
-
         self.messages = [
             {"role": "system", "content": self.test_behavior},
             {"role":"user", "content": "Please develop a complex form that includes various input types and validation rules on the quality of pastas."},
-            {"role": "user", "content" : "The following is the ARIA snapshot of the page:"},
-            {"role": "user", "content": content},
         ]
 
         self.llm_access_content()
 
     def continue_explore(self):
-        content = self.browser.explore_view()
-
-        self.messages.append({"role": "user", "content": "The following is the ARIA snapshot of the page:"})
-        self.messages.append({"role": "user", "content": content})
-
         self.llm_access_content()
 
     def perform_click(self, instructions):
