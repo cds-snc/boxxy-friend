@@ -42,10 +42,11 @@ class Browser:
             role, name = match.group(1), match.group(2)
             print(f'Clicking on role "{role}" with name "{name}"')
             self.page.get_by_role(role, name=name).click()
-            return
+        else:
+            print("Clicking on element with text:", element)
+            self.page.get_by_text(element).click()
 
-        print("Clicking on element with text:", element)
-        self.page.get_by_text(element).click()
+        self.page.wait_for_timeout(1000) # let the click event actually do something.
 
     def test_browser(self):
         async def run():
