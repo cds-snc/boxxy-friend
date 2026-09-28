@@ -3,7 +3,10 @@ import re
 from transformers import AutoProcessor, AutoModelForMultimodalLM
 from transformers.utils.chat_parsing_utils import recursive_parse
 
+
 class LLM:
+    MAX_PARSE_ATTEMPTS = 2
+
     def __init__(self):
         self.model = None
         self.processor = None
@@ -21,6 +24,34 @@ class LLM:
         self.processor = processor
 
     def gen_text(self, input_text, tools_schema=None):
+        messages = input_text
+
+        for attempt in range(self.MAX_PARSE_ATTEMPTS):
+            response = self._generate_response(messages, tools_schema)
+
+            try:
+                return self._parse_response(response)
+            except ValueError:
+                if attempt == self.MAX_PARSE_ATTEMPTS - 1:
+                    raise
+
+                messages = [
+                    *input_text,
+                    {"role": "model", "content": response},
+                    {
+                        "role": "user",
+                        "content": (
+                            "Your previous response could not be parsed. Respond again with the same intended "
+                            "answer, but ensure every tool call is valid JSON. JSON object keys and string values "
+                            "must use double quotes, not single quotes. Do not include the invalid response in your "
+                            "answer."
+                        )
+                    }
+                ]
+
+        raise RuntimeError("LLM response generation exhausted without returning or raising")
+
+    def _generate_response(self, input_text, tools_schema):
         text = self.processor.apply_chat_template(
             input_text,
             tools=tools_schema,
@@ -32,8 +63,9 @@ class LLM:
         input_len = inputs["input_ids"].shape[1]
 
         outputs = self.model.generate(**inputs, max_new_tokens=1024)
-        response = self.processor.decode(outputs[0][input_len:], skip_special_tokens=False)
+        return self.processor.decode(outputs[0][input_len:], skip_special_tokens=False)
 
+    def _parse_response(self, response):
         parsed_response = self.processor.parse_response(response)
 
         thoughts = parsed_response.get("thinking", "")
