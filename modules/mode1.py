@@ -48,6 +48,32 @@ class Mode1:
                         "required": ["element"]
                     }
                 }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "perform_typing",
+                    "description": "Perform a typing action on the web page.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "element": {
+                                "type": "string",
+                                "description": "The exact line for the target element as it appears verbatim in the "
+                                    "ARIA snapshot, in the form <role> \"<accessible name>\" (e.g. button \"Design a "
+                                    "form Start with a blank form.\"). Copy the role and full quoted accessible name "
+                                    "character-for-character from the snapshot, including any inner text from child "
+                                    "elements. Do not paraphrase, summarize, truncate, or invent text that isn't in "
+                                    "the snapshot."
+                            },
+                            "text": {
+                                "type": "string",
+                                "description": "The text to type into the target element."
+                            }
+                        },
+                        "required": ["element", "text"]
+                    }
+                }
             }
         ]
 
@@ -85,6 +111,8 @@ class Mode1:
             log(tool_call)
             if tool_call['function']['name'] == 'perform_click':
                 self.perform_click(tool_call['function']['arguments'])
+            elif tool_call['function']['name'] == 'perform_typing':
+                self.perform_typing(tool_call['function']['arguments'])
         
         if tools_used:
             self.continue_explore()
@@ -104,6 +132,9 @@ class Mode1:
 
     def perform_click(self, instructions):
         self.browser.click(instructions["element"])
+
+    def perform_typing(self, instructions):
+        self.browser.type(instructions["element"], instructions["text"])
 
     def report(self):
         self.messages.append({"role": "user", "content": "Please provide a final report based on the exploration."})

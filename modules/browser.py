@@ -28,6 +28,20 @@ class Browser:
     # Matches ARIA snapshot node lines like: button "Design a form Start with a blank form."
     _ROLE_NAME_RE = re.compile(r'^\s*([a-zA-Z]+)\s+"(.*)"\s*$')
 
+    def type(self, element, text):
+        if self.browser is None:
+            raise Exception("Browser is not open. Call open() first.")
+
+        match = self._ROLE_NAME_RE.match(element)
+        if match:
+            role, name = match.group(1), match.group(2)
+            print(f'Typing into role "{role}" with name "{name}"')
+            self.page.get_by_role(role, name=name).fill(text)
+        else:
+            print("Typing into element with text:", element)
+            self.page.get_by_text(element).fill(text)
+
+        self.page.wait_for_timeout(500) # let the typing event actually do something.
     def click(self, element):
         if self.browser is None:
             raise Exception("Browser is not open. Call open() first.")
