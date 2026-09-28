@@ -3,6 +3,7 @@ from modules.logger import log
 
 class Mode1:
     def __init__(self, test_url, local_path):
+        self.complete_counter = 0
         self.test_url = test_url
         self.test_behavior = "You are an automated testing agent mimicking a user utilizing a screen reader. " \
         "Your goal is to test the whole application for accessibility and functionality." \
@@ -104,6 +105,7 @@ class Mode1:
         ## Do any tool calls.
         for tool_call in response['tool_calls']:
             tools_used = True
+            self.complete_counter = 0 # reset the completion counter whenever a tool is used
             log(tool_call)
             if tool_call['function']['name'] == 'perform_click':
                 response_text += self.perform_click(tool_call['function']['arguments'])
@@ -118,7 +120,7 @@ class Mode1:
         if tools_used:
             self.continue_explore()
         else:
-            self.report()
+            self.validate_status()
 
     def explore(self):
         self.messages = [
@@ -136,6 +138,15 @@ class Mode1:
 
     def perform_typing(self, instructions):
         return self.browser.type(instructions["element"], instructions["text"])
+
+    def validate_status(self):
+        self.complete_counter += 1
+
+        if self.complete_counter >= 2: # if we haven't used a tool twice in a row, we're done.
+            self.report()
+        else:
+            self.messages.append({"role": "user", "content": "Use a tool to continue, or report completion."})
+            self.llm_access_content()
 
     def report(self):
         self.messages.append({"role": "user", "content": "Please provide a final report based on the exploration."})
