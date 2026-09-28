@@ -41,7 +41,7 @@ class Browser:
             print("Typing into element with text:", element)
             self.page.get_by_text(element).fill(text)
 
-        self.page.wait_for_timeout(500) # let the typing event actually do something.
+        self.page.wait_for_timeout(1000) # let the typing event actually do something.
     def click(self, element):
         if self.browser is None:
             raise Exception("Browser is not open. Call open() first.")
@@ -63,7 +63,7 @@ class Browser:
             print("Clicking on element with text:", element)
             self.page.get_by_text(element).click()
 
-        self.page.wait_for_timeout(500) # let the click event actually do something.
+        self.page.wait_for_timeout(1000) # let the click event actually do something.
 
     def test_browser(self):
         async def run():
