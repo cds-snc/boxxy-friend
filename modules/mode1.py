@@ -96,23 +96,24 @@ class Mode1:
         response = self.llm.gen_text(messages_with_snapshot, self.tools_schema)
 
         response_text = response['text']
-        if response['tool_calls']:
-            response_text = response['thoughts']
-        log(f"{response_text}")
+        if response['thoughts']:
+            response_text += response['thoughts']
         
         tools_used = False
-
-        ## Append the latest user message to the conversation history
-        self.messages.append({"role": "model", "content": response_text})
 
         ## Do any tool calls.
         for tool_call in response['tool_calls']:
             tools_used = True
             log(tool_call)
             if tool_call['function']['name'] == 'perform_click':
-                self.perform_click(tool_call['function']['arguments'])
+                response_text += self.perform_click(tool_call['function']['arguments'])
+
             elif tool_call['function']['name'] == 'perform_typing':
-                self.perform_typing(tool_call['function']['arguments'])
+                response_text += self.perform_typing(tool_call['function']['arguments'])
+
+        ## Append the latest user message to the conversation history
+        self.messages.append({"role": "model", "content": response_text})
+        log(response_text)
         
         if tools_used:
             self.continue_explore()
@@ -131,10 +132,10 @@ class Mode1:
         self.llm_access_content()
 
     def perform_click(self, instructions):
-        self.browser.click(instructions["element"])
+        return self.browser.click(instructions["element"])
 
     def perform_typing(self, instructions):
-        self.browser.type(instructions["element"], instructions["text"])
+        return self.browser.type(instructions["element"], instructions["text"])
 
     def report(self):
         self.messages.append({"role": "user", "content": "Please provide a final report based on the exploration."})

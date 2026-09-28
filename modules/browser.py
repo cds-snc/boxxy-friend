@@ -20,7 +20,6 @@ class Browser:
         if self.browser is None:
             raise Exception("Browser is not open. Call open() first.")
         
-
         self.page.wait_for_load_state()
 
         return self.page.aria_snapshot()
@@ -32,20 +31,25 @@ class Browser:
         if self.browser is None:
             raise Exception("Browser is not open. Call open() first.")
 
+        result = ""
+
         match = self._ROLE_NAME_RE.match(element)
         if match:
             role, name = match.group(1), match.group(2)
-            print(f'Typing into role "{role}" with name "{name}"')
+            result = f'I typed into role "{role}" with name "{name}" : "{text}"'
             self.page.get_by_role(role, name=name).fill(text)
         else:
-            print("Typing into element with text:", element)
+            result = f'I typed into element with text: "{element} " : "{text}"'
             self.page.get_by_text(element).fill(text)
 
         self.page.wait_for_timeout(1000) # let the typing event actually do something.
+        return result
+    
     def click(self, element):
         if self.browser is None:
             raise Exception("Browser is not open. Call open() first.")
 
+        result = ""
         # `element` is typically a line from the ARIA tree/snapshot, e.g.:
         #   button "Design a form Start with a blank form."
         # The quoted text is the *accessible name*, which is computed by
@@ -57,13 +61,14 @@ class Browser:
         match = self._ROLE_NAME_RE.match(element)
         if match:
             role, name = match.group(1), match.group(2)
-            print(f'Clicking on role "{role}" with name "{name}"')
+            result = f'I clicked on role "{role}" with name "{name}"'
             self.page.get_by_role(role, name=name).click()
         else:
-            print("Clicking on element with text:", element)
+            result = f'I clicked on element with text: "{element}"'
             self.page.get_by_text(element).click()
 
         self.page.wait_for_timeout(1000) # let the click event actually do something.
+        return result
 
     def test_browser(self):
         async def run():
