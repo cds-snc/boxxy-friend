@@ -1,4 +1,5 @@
 import json
+from modules.logger import log
 
 class Mode1:
     def __init__(self, test_url, local_path):
@@ -63,11 +64,13 @@ class Mode1:
             {"role": "user", "content": content},
         ] 
 
-        print(content)
+        log("Exploring content...", clear_screen=True)
+        log(content)
 
         response = self.llm.gen_text(messages_with_snapshot, self.tools_schema)
 
-        print(f"{response['text']}")
+        log(f"{response['text']}")
+        log(response)
         
         tools_used = False
 
@@ -77,7 +80,7 @@ class Mode1:
         ## Do any tool calls.
         for tool_call in response['tool_calls']:
             tools_used = True
-            print(tool_call)
+            log(tool_call)
             if tool_call['function']['name'] == 'perform_click':
                 self.perform_click(tool_call['function']['arguments'])
         
@@ -104,4 +107,4 @@ class Mode1:
         self.messages.append({"role": "user", "content": "Please provide a final report based on the exploration."})
         
         response = self.llm.gen_text(self.messages, self.tools_schema)
-        print(f"{response['text']}\r", flush=True)
+        log(f"{response['text']}\r", clear_screen=True)

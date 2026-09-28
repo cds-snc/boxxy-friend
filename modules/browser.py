@@ -12,14 +12,20 @@ class Browser:
 
     def open(self):
         self.playwright = sync_playwright().start()
-        self.browser = self.playwright.chromium.launch(headless=True)
+        self.browser = self.playwright.chromium.launch(headless=False)
         self.page = self.browser.new_page()
         self.page.goto(self.base_url)
 
     def explore_view(self):
         if self.browser is None:
             raise Exception("Browser is not open. Call open() first.")
+        
+        self.page.wait_for_load_state('domcontentloaded')
+        self.page.wait_for_load_state('load')
         self.page.wait_for_load_state('networkidle')
+
+        self.page.wait_for_timeout(1000) # wait a bit in case.
+
         return self.page.aria_snapshot()
 
     # Matches ARIA snapshot node lines like: button "Design a form Start with a blank form."
