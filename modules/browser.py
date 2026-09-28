@@ -20,11 +20,8 @@ class Browser:
         if self.browser is None:
             raise Exception("Browser is not open. Call open() first.")
         
-        self.page.wait_for_load_state('domcontentloaded')
-        self.page.wait_for_load_state('load')
-        self.page.wait_for_load_state('networkidle')
 
-        self.page.wait_for_timeout(1000) # wait a bit in case.
+        self.page.wait_for_load_state()
 
         return self.page.aria_snapshot()
 
@@ -52,7 +49,7 @@ class Browser:
             print("Clicking on element with text:", element)
             self.page.get_by_text(element).click()
 
-        self.page.wait_for_timeout(1000) # let the click event actually do something.
+        self.page.wait_for_timeout(500) # let the click event actually do something.
 
     def test_browser(self):
         async def run():

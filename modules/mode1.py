@@ -69,13 +69,15 @@ class Mode1:
 
         response = self.llm.gen_text(messages_with_snapshot, self.tools_schema)
 
-        log(f"{response['text']}")
-        log(response)
+        response_text = response['text']
+        if response['tool_calls']:
+            response_text = response['thoughts']
+        log(f"{response_text}")
         
         tools_used = False
 
         ## Append the latest user message to the conversation history
-        self.messages.append({"role": "model", "content": response['text']})
+        self.messages.append({"role": "model", "content": response_text})
 
         ## Do any tool calls.
         for tool_call in response['tool_calls']:
