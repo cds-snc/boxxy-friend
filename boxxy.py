@@ -1,32 +1,9 @@
 ## Boxxy is your friend!
 ## Boxxy will imitate a user in interacting with web pages to perform a task.
+from modules.gui import BoxxyGui
+
 test_url = "https://forms-staging.cdssandbox.xyz/en/form-builder"
 local_path = "./models/gemma-4-E2B-it"
 
-print("Welcome to Boxxy!")
-print("----")
-print("## --> Mode 1 : Boxxy will visit pages and receive content in a manner similiar to a screen reader.")
-print("## --> Mode 2 : Boxxy will take screenshots of the page, and analyze the visual content then interact accordingly.")
-print("----")
-mode = input("What mode of Boxxy would you like to use? (1 or 2)")
-
-if mode == "1":
-    print("You have selected Mode 1: Boxxy will visit pages and receive content in a manner similiar to a screen reader.")
-    from modules.mode1 import Mode1
-    boxxy = Mode1(test_url, local_path)
-elif mode == "2":
-    print("You have selected Mode 2: Boxxy will take screenshots of the page, and analyze the visual content then interact accordingly.")
-    print("Sorry mode 2 isn't ready yet! Exiting!~")
-    exit()
-else:
-    print("Invalid mode selected. Boxxy is sad now. :(")
-    exit()
-
-# Launch the Browser
-boxxy.launch()
-
-# Start exploring!~
-boxxy.explore()
-
-# Generate a report.
-boxxy.report()
+if __name__ == "__main__":
+    BoxxyGui(test_url=test_url, model_path=local_path).run()

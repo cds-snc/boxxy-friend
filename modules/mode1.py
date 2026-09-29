@@ -1,10 +1,17 @@
 import json
 from modules.logger import log
 
+
+class StopRequested(Exception):
+    """Raised when the user asks Boxxy to stop exploring."""
+
+
 class Mode1:
-    def __init__(self, test_url, local_path):
+    def __init__(self, test_url, local_path=None, llm=None, on_snapshot=None, stop_event=None):
         self.complete_counter = 0
         self.test_url = test_url
+        self.on_snapshot = on_snapshot
+        self.stop_event = stop_event
         self.test_behavior = "You are an automated testing agent mimicking a user utilizing a screen reader. " \
         "Your goal is to test the whole application for accessibility and functionality." \
         "You are testing GC Forms, a product for creating and managing web forms." \
@@ -23,9 +30,11 @@ class Mode1:
         from modules.browser import Browser
         self.browser = Browser(self.test_url)
 
-        from modules.llm import LLM
-        self.llm = LLM()
-        self.llm.load_model(local_path)
+        if llm is None:
+            from modules.llm import LLM
+            llm = LLM()
+            llm.load_model(local_path)
+        self.llm = llm
 
         self.tools_schema = [
             {
@@ -83,7 +92,15 @@ class Mode1:
     def launch(self):
         self.browser.open()
 
+    def close(self):
+        self.browser.close()
+
+    def _check_stop(self):
+        if self.stop_event is not None and self.stop_event.is_set():
+            raise StopRequested("Boxxy was asked to stop.")
+
     def llm_access_content(self):
+        self._check_stop()
         content = self.browser.explore_view()
 
         messages_with_snapshot = self.messages + [
@@ -92,9 +109,13 @@ class Mode1:
         ] 
 
         log("Exploring content...", clear_screen=True)
-        log(content)
+        if self.on_snapshot is not None:
+            self.on_snapshot(content)
+        else:
+            log(content)
 
         response = self.llm.gen_text(messages_with_snapshot, self.tools_schema)
+        self._check_stop()
 
         response_text = response['text']
         if response['thoughts']:
@@ -106,6 +127,7 @@ class Mode1:
         for tool_call in response['tool_calls']:
             tools_used = True
             self.complete_counter = 0 # reset the completion counter whenever a tool is used
+            self._check_stop()
             log(tool_call)
             if tool_call['function']['name'] == 'perform_click':
                 response_text += self.perform_click(tool_call['function']['arguments'])

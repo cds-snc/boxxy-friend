@@ -16,6 +16,17 @@ class Browser:
         self.page = self.browser.new_page()
         self.page.goto(self.base_url)
 
+    def close(self):
+        # Must be called from the same thread that called open() (Playwright sync API requirement).
+        try:
+            if self.browser is not None:
+                self.browser.close()
+        finally:
+            self.browser = None
+            if self.playwright is not None:
+                self.playwright.stop()
+                self.playwright = None
+
     def explore_view(self):
         if self.browser is None:
             raise Exception("Browser is not open. Call open() first.")
