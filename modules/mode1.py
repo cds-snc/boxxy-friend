@@ -1,3 +1,6 @@
+import json
+import re
+
 from modules.logger import log
 
 
@@ -6,11 +9,22 @@ class StopRequested(Exception):
 
 
 class Mode1:
+    MAX_NO_PROGRESS_TURNS = 5
+    MAX_LISTED_ELEMENTS = 40
+    _ACTIONABLE_ROLES = {
+        "button", "link", "textbox", "searchbox", "combobox", "checkbox", "radio", "switch",
+        "tab", "menuitem", "menuitemcheckbox", "menuitemradio", "option", "spinbutton", "slider",
+    }
+    # Matches snapshot lines like: - button "Add form element" [disabled]
+    _SNAPSHOT_ELEMENT_RE = re.compile(r'^\s*-\s+([a-z]+)\s+"((?:[^"\\]|\\.)*)"(.*)$')
+
     def __init__(self, test_url, local_path=None, llm=None, on_snapshot=None, stop_event=None):
-        self.complete_counter = 0
         self.test_url = test_url
         self.on_snapshot = on_snapshot
         self.stop_event = stop_event
+        self._blocked_snapshot = None
+        self._blocked_actions = set()
+        self._blocked_targets = set()
         self.test_behavior = "You are an automated testing agent mimicking a user utilizing a screen reader. " \
         "Your goal is to test the whole application for accessibility and functionality." \
         "You are testing GC Forms, a product for creating and managing web forms." \
@@ -23,7 +37,9 @@ class Mode1:
         "in the snapshot, including any text contributed by child elements. Never paraphrase, shorten, or " \
         "reword the accessible name, and never invent an element that is not present in the snapshot. " \
         "Use the available tools directly whenever an action is needed. Do not write or imitate tool-call " \
-        "JSON in your message; the tools are provided through the tool-calling interface."
+        "JSON in your message; the tools are provided through the tool-calling interface. Do not ask the user " \
+        "for guidance. A response without a tool call does not mean the task is complete: keep exploring and " \
+        "trying reasonable actions until the form is visibly complete or you can identify a concrete blocker."
 
         # Initialize notes to keep track of observations during exploration.
         self.messages = []
@@ -98,14 +114,17 @@ class Mode1:
         if self.stop_event is not None and self.stop_event.is_set():
             raise StopRequested("Boxxy was asked to stop.")
 
-    def llm_access_content(self):
+    def llm_access_content(self, feedback=None):
         self._check_stop()
         content = self.browser.explore_view()
+        if content != self._blocked_snapshot:
+            self._reset_blocked(content)
 
         messages_with_snapshot = self.messages + [
-            {"role": "user", "content" : "The following is the ARIA snapshot of the page:"},
+            {"role": "user", "content": "The following is the current ARIA snapshot of the page:"},
             {"role": "user", "content": content},
-        ] 
+            {"role": "user", "content": self._page_guidance(content, feedback)},
+        ]
 
         log("Exploring content...", clear_screen=True)
         if self.on_snapshot is not None:
@@ -116,43 +135,171 @@ class Mode1:
         response = self.llm.gen_text(messages_with_snapshot, self.tools_schema)
         self._check_stop()
 
-        response_text = response['text']
-        if response['thoughts']:
-            response_text += response['thoughts']
-        
-        tools_used = False
-
-        ## Do any tool calls.
-        for tool_call in response['tool_calls']:
-            tools_used = True
-            self.complete_counter = 0 # reset the completion counter whenever a tool is used
+        successful_action = False
+        state_changed = False
+        action_errors = []
+        for tool_call in response["tool_calls"]:
             self._check_stop()
             log(tool_call)
-            if tool_call['function']['name'] == 'perform_click':
-                response_text += self.perform_click(tool_call['function']['arguments'])
+            name = "unknown"
+            arguments = {}
+            action_failed = False
+            try:
+                function = tool_call.get("function", {})
+                name = function.get("name", "unknown")
+                arguments = function.get("arguments", {})
+                action_signature = self._action_signature(name, arguments)
+                if action_signature in self._blocked_actions:
+                    log(f"Rejected repeated action: {action_signature}")
+                    action_errors.append(
+                        f"{action_signature} was not executed: it already failed while the page was in "
+                        "this unchanged state. Choose a different visible action."
+                    )
+                    continue
 
-            elif tool_call['function']['name'] == 'perform_typing':
-                response_text += self.perform_typing(tool_call['function']['arguments'])
+                if name == "perform_click":
+                    self.perform_click(arguments)
+                elif name == "perform_typing":
+                    self.perform_typing(arguments)
+                else:
+                    raise ValueError(f"Unsupported tool: {name}")
+                successful_action = True
+            except Exception as exc:
+                action_signature = self._action_signature(name, arguments)
+                error = f"{action_signature} failed: {type(exc).__name__}: {exc}"
+                log(f"Browser action failed: {error}")
+                action_failed = True
 
-        ## Append the latest user message to the conversation history
-        self.messages.append({"role": "model", "content": response_text})
-        log(response_text)
-        
-        if tools_used:
-            self.continue_explore()
-        else:
-            self.validate_status()
+            updated_content = self.browser.explore_view()
+            state_changed = updated_content != content
+            if state_changed:
+                content = updated_content
+                self._reset_blocked(content)
+                if self.on_snapshot is not None:
+                    self.on_snapshot(content)
+                else:
+                    log(content)
+                if action_failed:
+                    action_errors.append(error + " The ARIA snapshot changed during the failed action.")
+                if successful_action or action_failed:
+                    break
+            elif action_failed:
+                self._blocked_actions.add(action_signature)
+                if isinstance(arguments, dict) and arguments.get("element"):
+                    self._blocked_targets.add(arguments["element"].strip().lstrip("- ").strip())
+                error += " The ARIA snapshot did not change."
+                action_errors.append(error)
+
+            if successful_action:
+                break
+
+        if successful_action:
+            summary = (
+                "Browser action succeeded: "
+                f"{self._action_signature(name, arguments)}. "
+                + (
+                    "The ARIA snapshot changed; use the new page state to choose the next action."
+                    if state_changed
+                    else "No ARIA snapshot change was detected; inspect the current state before continuing."
+                )
+            )
+            self.messages.append({"role": "model", "content": summary})
+            log(summary)
+
+        return successful_action, action_errors
+
+    @staticmethod
+    def _action_signature(name, arguments):
+        return f"{name} with arguments {json.dumps(arguments, sort_keys=True, ensure_ascii=True)}"
+
+    def _reset_blocked(self, snapshot):
+        self._blocked_snapshot = snapshot
+        self._blocked_actions.clear()
+        self._blocked_targets.clear()
+
+    def _blocked_elements(self):
+        return self._blocked_targets
+
+    def _available_elements(self, snapshot):
+        blocked = self._blocked_elements()
+        elements = []
+        for line in snapshot.splitlines():
+            match = self._SNAPSHOT_ELEMENT_RE.match(line)
+            if not match or match.group(1) not in self._ACTIONABLE_ROLES or "[disabled]" in match.group(3):
+                continue
+            element = f'{match.group(1)} "{match.group(2)}"'
+            if element not in blocked and element not in elements:
+                elements.append(element)
+        return elements
+
+    def _page_guidance(self, snapshot, feedback=None):
+        parts = []
+        elements = self._available_elements(snapshot)
+        if elements:
+            listed = elements[:self.MAX_LISTED_ELEMENTS]
+            parts.append(
+                "Elements you can use now (copy one exactly as the 'element' argument):\n"
+                + "\n".join(listed)
+            )
+
+        blocked = sorted(self._blocked_elements())
+        if blocked:
+            parts.append("Do not use these elements; they already failed on this page:\n" + "\n".join(blocked))
+
+        if feedback:
+            parts.append(feedback)
+
+        parts.append("Choose the next action that moves the form forward.")
+        return "\n\n".join(parts)
 
     def explore(self):
         self.messages = [
             {"role": "system", "content": self.test_behavior},
-            {"role":"user", "content": "Please develop a complex form that includes various input types and validation rules on the quality of pastas."},
+            {"role": "user", "content": "Please develop a complex form that includes various input types and validation rules on the quality of pastas."},
         ]
 
-        self.llm_access_content()
+        no_progress_turns = 0
+        feedback = None
+        self._reset_blocked(None)
+        while True:
+            self._check_stop()
+            made_progress, action_errors = self.llm_access_content(feedback)
+            if made_progress:
+                no_progress_turns = 0
+                feedback = None
+                if action_errors:
+                    feedback = (
+                        "One or more actions failed:\n"
+                        + "\n".join(action_errors)
+                        + "\nThose failed actions are blocked for this unchanged page state. Inspect the current "
+                        "snapshot and choose a different visible target or a different action."
+                    )
+                continue
 
-    def continue_explore(self):
-        self.llm_access_content()
+            no_progress_turns += 1
+            if action_errors:
+                feedback = (
+                    "The previous browser action did not succeed:\n"
+                    + "\n".join(action_errors)
+                    + "\nDo not repeat any listed action while the ARIA snapshot is unchanged. Inspect the "
+                    "current snapshot, choose a different visible target or action, and account for any page-state "
+                    "change noted above."
+                )
+            else:
+                feedback = (
+                    "No browser action was performed. Continue the task without asking the user for guidance. "
+                    "Choose a reasonable action visible in the current snapshot, or use the snapshot and prior "
+                    "evidence to identify a concrete blocker. A text-only response is not proof of completion."
+                )
+
+            if no_progress_turns >= self.MAX_NO_PROGRESS_TURNS:
+                self.report(
+                    "No browser action succeeded for "
+                    f"{no_progress_turns} consecutive turns. Assess the current page and prior evidence; "
+                    "do not claim completion unless the form is visibly complete.\n"
+                    + feedback
+                )
+                return
 
     def perform_click(self, instructions):
         return self.browser.click(instructions["element"])
@@ -160,17 +307,17 @@ class Mode1:
     def perform_typing(self, instructions):
         return self.browser.type(instructions["element"], instructions["text"])
 
-    def validate_status(self):
-        self.complete_counter += 1
+    def report(self, feedback=None):
+        report_messages = self.messages + [
+            {
+                "role": "user",
+                "content": "Please provide a final report based only on observed evidence. State whether the "
+                    "form was completed, and identify any concrete blockers. Do not describe unverified actions "
+                    "as successful.",
+            }
+        ]
+        if feedback:
+            report_messages.append({"role": "user", "content": feedback})
 
-        if self.complete_counter >= 2: # if we haven't used a tool twice in a row, we're done.
-            self.report()
-        else:
-            self.messages.append({"role": "user", "content": "Use a tool to continue, or report completion."})
-            self.llm_access_content()
-
-    def report(self):
-        self.messages.append({"role": "user", "content": "Please provide a final report based on the exploration."})
-        
-        response = self.llm.gen_text(self.messages, self.tools_schema)
+        response = self.llm.gen_text(report_messages, self.tools_schema)
         log(f"{response['text']}\r", clear_screen=True)

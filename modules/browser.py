@@ -5,6 +5,10 @@ import re
 from playwright.sync_api import sync_playwright
 
 class Browser:
+    # Short enough that a click blocked by an overlay fails fast instead of
+    # waiting Playwright's default 30s for the element to become actionable.
+    ACTION_TIMEOUT_MS = 5000
+
     def __init__(self, base_url):
         self.base_url = base_url
         self.browser = None
@@ -14,6 +18,7 @@ class Browser:
         self.playwright = sync_playwright().start()
         self.browser = self.playwright.chromium.launch(headless=False)
         self.page = self.browser.new_page()
+        self.page.set_default_timeout(self.ACTION_TIMEOUT_MS)
         self.page.goto(self.base_url)
 
     def close(self):
