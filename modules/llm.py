@@ -57,7 +57,7 @@ class LLM:
             tools=tools_schema,
             tokenize=False,
             add_generation_prompt=True,
-            enable_thinking=False
+            enable_thinking=True
         )
         inputs = self.processor(text=text, return_tensors="pt").to(self.model.device)
         input_len = inputs["input_ids"].shape[1]
