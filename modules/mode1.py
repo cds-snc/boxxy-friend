@@ -1,4 +1,3 @@
-import json
 from modules.logger import log
 
 
@@ -22,7 +21,9 @@ class Mode1:
         "snapshot you were given, in the exact form <role> \"<accessible name>\" (for example: " \
         "button \"Design a form Start with a blank form.\"). Use the full accessible name exactly as it appears " \
         "in the snapshot, including any text contributed by child elements. Never paraphrase, shorten, or " \
-        "reword the accessible name, and never invent an element that is not present in the snapshot."
+        "reword the accessible name, and never invent an element that is not present in the snapshot. " \
+        "Use the available tools directly whenever an action is needed. Do not write or imitate tool-call " \
+        "JSON in your message; the tools are provided through the tool-calling interface."
 
         # Initialize notes to keep track of observations during exploration.
         self.messages = []
@@ -86,8 +87,6 @@ class Mode1:
                 }
             }
         ]
-
-        self.test_behavior += f" You have access to the following tools: {json.dumps(self.tools_schema)}. If you need to call a function, respond strictly with a JSON object containing 'function' and 'args'."
 
     def launch(self):
         self.browser.open()
