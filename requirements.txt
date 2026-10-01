@@ -1,0 +1,4 @@
+huggingface_hub
+playwright
+torch
+transformers>=5.5.0
