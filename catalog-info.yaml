@@ -1,0 +1,11 @@
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: Boxxy-Friend
+  description: An automated Blackbox Testing tool.
+  labels:
+    license: MIT
+spec:
+  type: application
+  lifecycle: experimental
+  owner: cds-snc

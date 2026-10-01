@@ -1,3 +1,7 @@
+# Notes on License
+
+While Boxxy is MIT licensed, the License of the LLM you use might be vastly different, please evaluate and only use models appropriately. Gemma (default atm) is Apache 2.0
+
 # To Install
 
 python3 -m venv .venv
