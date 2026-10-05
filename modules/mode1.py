@@ -36,6 +36,8 @@ class Mode1:
         "button \"Design a form Start with a blank form.\"). Use the full accessible name exactly as it appears " \
         "in the snapshot, including any text contributed by child elements. Never paraphrase, shorten, or " \
         "reword the accessible name, and never invent an element that is not present in the snapshot. " \
+        "To choose a value in a dropdown (a combobox), call perform_select_option with the combobox as 'element' " \
+        "and the option's accessible name as 'option'; do not click the option elements of a combobox directly. " \
         "Use the available tools directly whenever an action is needed. Do not write or imitate tool-call " \
         "JSON in your message; the tools are provided through the tool-calling interface. Do not ask the user " \
         "for guidance. A response without a tool call does not mean the task is complete: keep exploring and " \
@@ -101,6 +103,31 @@ class Mode1:
                         "required": ["element", "text"]
                     }
                 }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "perform_select_option",
+                    "description": "Select an option in a dropdown (combobox) on the web page. Works for native "
+                        "select elements and custom comboboxes; the dropdown is opened automatically.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "element": {
+                                "type": "string",
+                                "description": "The combobox exactly as it appears in the ARIA snapshot, in the form "
+                                    "combobox \"<accessible name>\" (e.g. combobox \"Order list:\"). Copy the "
+                                    "accessible name character-for-character from the snapshot."
+                            },
+                            "option": {
+                                "type": "string",
+                                "description": "The accessible name of the option to select, copied exactly from the "
+                                    "snapshot (e.g. Alphabetically (A-Z))."
+                            }
+                        },
+                        "required": ["element", "option"]
+                    }
+                }
             }
         ]
 
@@ -161,6 +188,8 @@ class Mode1:
                     self.perform_click(arguments)
                 elif name == "perform_typing":
                     self.perform_typing(arguments)
+                elif name == "perform_select_option":
+                    self.perform_select_option(arguments)
                 else:
                     raise ValueError(f"Unsupported tool: {name}")
                 successful_action = True
@@ -185,7 +214,8 @@ class Mode1:
                     break
             elif action_failed:
                 self._blocked_actions.add(action_signature)
-                if isinstance(arguments, dict) and arguments.get("element"):
+                # A bad option shouldn't hide the whole combobox; the exact action is still blocked above.
+                if name != "perform_select_option" and isinstance(arguments, dict) and arguments.get("element"):
                     self._blocked_targets.add(arguments["element"].strip().lstrip("- ").strip())
                 error += " The ARIA snapshot did not change."
                 action_errors.append(error)
@@ -223,14 +253,44 @@ class Mode1:
     def _available_elements(self, snapshot):
         blocked = self._blocked_elements()
         elements = []
+        combobox_indent = None
         for line in snapshot.splitlines():
+            indent = len(line) - len(line.lstrip())
+            if combobox_indent is not None and indent <= combobox_indent:
+                combobox_indent = None
             match = self._SNAPSHOT_ELEMENT_RE.match(line)
-            if not match or match.group(1) not in self._ACTIONABLE_ROLES or "[disabled]" in match.group(3):
+            if not match:
+                continue
+            if match.group(1) == "combobox":
+                combobox_indent = indent
+            elif combobox_indent is not None and match.group(1) == "option":
+                continue  # Listed with its combobox; selected via perform_select_option.
+            if match.group(1) not in self._ACTIONABLE_ROLES or "[disabled]" in match.group(3):
                 continue
             element = f'{match.group(1)} "{match.group(2)}"'
             if element not in blocked and element not in elements:
                 elements.append(element)
         return elements
+
+    def _combobox_options(self, snapshot):
+        comboboxes = {}
+        current, current_indent = None, None
+        for line in snapshot.splitlines():
+            indent = len(line) - len(line.lstrip())
+            if current is not None and indent <= current_indent:
+                current = None
+            match = self._SNAPSHOT_ELEMENT_RE.match(line)
+            if not match:
+                continue
+            if match.group(1) == "combobox":
+                if "[disabled]" in match.group(3):
+                    continue
+                current, current_indent = f'combobox "{match.group(2)}"', indent
+                comboboxes.setdefault(current, [])
+            elif current is not None and match.group(1) == "option":
+                selected = " [selected]" if "[selected]" in match.group(3) else ""
+                comboboxes[current].append(f'"{match.group(2)}"{selected}')
+        return comboboxes
 
     def _page_guidance(self, snapshot, feedback=None):
         parts = []
@@ -240,6 +300,17 @@ class Mode1:
             parts.append(
                 "Elements you can use now (copy one exactly as the 'element' argument):\n"
                 + "\n".join(listed)
+            )
+
+        comboboxes = self._combobox_options(snapshot)
+        if comboboxes:
+            parts.append(
+                "Dropdowns (use perform_select_option with the combobox as 'element' and an option name as "
+                "'option'; custom dropdowns may not list their options until opened):\n"
+                + "\n".join(
+                    f"{combobox} options: {', '.join(options) if options else '(not listed)'}"
+                    for combobox, options in comboboxes.items()
+                )
             )
 
         blocked = sorted(self._blocked_elements())
@@ -306,6 +377,9 @@ class Mode1:
 
     def perform_typing(self, instructions):
         return self.browser.type(instructions["element"], instructions["text"])
+
+    def perform_select_option(self, instructions):
+        return self.browser.use_combobox(instructions["element"], instructions["option"])
 
     def report(self, feedback=None):
         report_messages = self.messages + [

@@ -43,6 +43,89 @@ class Browser:
     # Matches ARIA snapshot node lines like: button "Design a form Start with a blank form."
     _ROLE_NAME_RE = re.compile(r'^\s*([a-zA-Z]+)\s+"(.*)"\s*$')
 
+    # Looser variant for comboboxes, whose snapshot lines may carry a leading "- ", a trailing ":" (native
+    # <select> with nested options) or ": <current value>" (custom ARIA comboboxes).
+    _LOOSE_ROLE_NAME_RE = re.compile(r'^\s*(?:-\s+)?([a-zA-Z]+)\s+"((?:[^"\\]|\\.)*)"')
+
+    def _locate_by_role_or_text(self, element):
+        match = self._LOOSE_ROLE_NAME_RE.match(element)
+        if not match:
+            return self.page.get_by_text(element), f'element with text "{element}"'
+        role, name = match.group(1), match.group(2)
+        locator = self.page.get_by_role(role, name=name, exact=True)
+        if locator.count() == 0:
+            locator = self.page.get_by_role(role, name=name)
+        return locator, f'role "{role}" with name "{name}"'
+
+    @classmethod
+    def _option_label(cls, value):
+        # Accept the option copied verbatim from the snapshot, e.g. option "As entered" [selected].
+        match = cls._LOOSE_ROLE_NAME_RE.match(value)
+        if match and match.group(1) == "option":
+            return match.group(2)
+        return value.strip()
+
+    def use_combobox(self, element, value):
+        if self.browser is None:
+            raise Exception("Browser is not open. Call open() first.")
+
+        label = self._option_label(value)
+        combobox, description = self._locate_by_role_or_text(element)
+        combobox = combobox.first
+
+        if combobox.evaluate("e => e.tagName.toLowerCase()") == "select":
+            selected = self._select_native_option(combobox, label)
+        else:
+            selected = self._select_custom_option(combobox, label)
+
+        self.page.wait_for_timeout(1000) # let the selection event actually do something.
+        return f'I selected option "{selected}" in {description}'
+
+    def _select_native_option(self, combobox, label):
+        try:
+            combobox.select_option(label=label)
+        except Exception:
+            try:
+                combobox.select_option(value=label)
+            except Exception:
+                available = combobox.evaluate("e => Array.from(e.options, o => o.label)")
+                raise ValueError(
+                    f'Option "{label}" not found. Available options: '
+                    + ", ".join(f'"{o}"' for o in available)
+                ) from None
+        return combobox.evaluate("e => e.selectedOptions[0] ? e.selectedOptions[0].label : ''")
+
+    def _select_custom_option(self, combobox, label):
+        if combobox.get_attribute("aria-expanded") != "true":
+            combobox.click()
+
+        # Options usually live in a popup referenced by aria-controls (or aria-owns), not inside the combobox.
+        popup_id = combobox.get_attribute("aria-controls") or combobox.get_attribute("aria-owns")
+        scope = self.page.locator(f'[id="{popup_id.split()[0]}"]') if popup_id else self.page
+
+        options = scope.get_by_role("option", name=label, exact=True)
+        if options.count() == 0 and combobox.evaluate(
+            "e => e.isContentEditable || ['input', 'textarea'].includes(e.tagName.toLowerCase())"
+        ):
+            # Autocomplete comboboxes only render matching options after typing.
+            combobox.fill(label)
+            try:
+                scope.get_by_role("option").first.wait_for(state="visible")
+            except Exception:
+                pass
+        if options.count() == 0:
+            options = scope.get_by_role("option", name=label)
+
+        if options.count() == 0:
+            available = scope.get_by_role("option").all_inner_texts()
+            raise ValueError(
+                f'Option "{label}" not found. Available options: '
+                + (", ".join(f'"{o.strip()}"' for o in available) or "none visible")
+            )
+
+        options.first.click()
+        return label
+
     def type(self, element, text):
         if self.browser is None:
             raise Exception("Browser is not open. Call open() first.")

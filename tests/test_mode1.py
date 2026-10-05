@@ -19,6 +19,7 @@ class FakeBrowser:
         self.fail_first_click = fail_first_click
         self.click_count = 0
         self.type_count = 0
+        self.selections = []
         self.snapshot = 'button "Continue"'
 
     def explore_view(self):
@@ -35,6 +36,10 @@ class FakeBrowser:
     def type(self, element, text):
         self.type_count += 1
         return f'Typed into {element}: {text}'
+
+    def use_combobox(self, element, value):
+        self.selections.append((element, value))
+        return f'Selected {value} in {element}'
 
 
 def response(tool_calls=None, text=""):
@@ -175,6 +180,52 @@ class Mode1RecoveryTests(unittest.TestCase):
         self.assertNotIn('button "Continue"', usable)
         self.assertIn('button "Continue"', avoid)
         self.assertIn('textbox "Form title"', usable)
+
+    def test_select_option_tool_uses_combobox(self):
+        llm = FakeLLM([
+            response([{
+                "function": {
+                    "name": "perform_select_option",
+                    "arguments": {"element": 'combobox "Order list:"', "option": "Alphabetically (A-Z)"},
+                }
+            }]),
+            response(text="Done."),
+            response(text="Done."),
+            response(text="Done."),
+        ])
+        mode = self.make_mode(llm, FakeBrowser())
+
+        with patch("modules.mode1.log"):
+            mode.explore()
+
+        self.assertEqual(mode.browser.selections, [('combobox "Order list:"', "Alphabetically (A-Z)")])
+        self.assertIn("Browser action succeeded: perform_select_option", str(mode.messages))
+
+    def test_guidance_groups_combobox_options(self):
+        llm = FakeLLM([response(text="Done."), response(text="Done."), response(text="Done.")])
+        browser = FakeBrowser()
+        browser.snapshot = (
+            '- main:\n'
+            '  - combobox "Order list:":\n'
+            '    - option "As entered" [selected]\n'
+            '    - option "Alphabetically (A-Z)"\n'
+            '  - combobox "Sort by:": Newest\n'
+            '  - listbox "Colours":\n'
+            '    - option "Red"\n'
+            '  - button "Continue"'
+        )
+        mode = self.make_mode(llm, browser)
+
+        with patch("modules.mode1.log"):
+            mode.explore()
+
+        usable, _, dropdowns = llm.calls[0][-1]["content"].partition("Dropdowns")
+        self.assertIn('combobox "Order list:"', usable)
+        self.assertNotIn('option "As entered"', usable)
+        self.assertIn('option "Red"', usable)
+        self.assertIn('button "Continue"', usable)
+        self.assertIn('combobox "Order list:" options: "As entered" [selected], "Alphabetically (A-Z)"', dropdowns)
+        self.assertIn('combobox "Sort by:" options: (not listed)', dropdowns)
 
 
 if __name__ == "__main__":
