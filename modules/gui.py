@@ -13,13 +13,14 @@ import time
 import traceback
 import tkinter as tk
 from datetime import datetime
-from tkinter import ttk
+from pathlib import Path
+from tkinter import messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 
 from modules import logger
+from modules.models import DEFAULT_MODELS_DIR, discover_models, validate_model
 
 DEFAULT_TEST_URL = "https://forms-staging.cdssandbox.xyz/en/form-builder"
-DEFAULT_MODEL_PATH = "./models/gemma-4-E2B-it"
 
 HAIKU_PROMPT = [
     {"role": "system", "content": "You are a poet. Reply with only the poem, no title or commentary."},
@@ -58,8 +59,11 @@ def parse_aria_snapshot(snapshot):
 
 
 class BoxxyGui:
-    def __init__(self, test_url=DEFAULT_TEST_URL, model_path=DEFAULT_MODEL_PATH):
+    def __init__(self, test_url=DEFAULT_TEST_URL, model_path=None, models_dir=DEFAULT_MODELS_DIR):
         self.model_path = model_path
+        self.models_dir = Path(models_dir).resolve()
+        self.test_url = test_url
+        self.main_open = False
         self.events = queue.Queue()
         self.llm = None
         self.model_loading = False
@@ -68,20 +72,94 @@ class BoxxyGui:
         self.closed = False
 
         self.root = tk.Tk()
-        self.root.title("Boxxy")
-        self.root.geometry("1200x800")
-        self.root.minsize(700, 450)
+        self.root.title("Boxxy - Select a model")
+        self.root.geometry("700x450")
+        self.root.minsize(600, 350)
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         # Exceptions raised inside Tk callbacks are shown in the GUI instead of stderr.
         self.root.report_callback_exception = self._on_tk_exception
 
-        self._build_toolbar(test_url)
+        self._build_model_selector()
+
+    def _build_model_selector(self):
+        self.selector = ttk.Frame(self.root, padding=20)
+        self.selector.pack(fill="both", expand=True)
+        ttk.Label(self.selector, text="Select a local model", font=("TkDefaultFont", 16, "bold")).pack(
+            anchor="w"
+        )
+        ttk.Label(self.selector, text=f"Models folder: {self.models_dir}", wraplength=640).pack(
+            anchor="w", pady=(8, 16)
+        )
+        self.model_var = tk.StringVar()
+        self.model_picker = ttk.Combobox(self.selector, textvariable=self.model_var, state="readonly")
+        self.model_picker.pack(fill="x")
+        self.selection_status = tk.StringVar()
+        ttk.Label(
+            self.selector, textvariable=self.selection_status, wraplength=640, justify="left"
+        ).pack(anchor="w", pady=12)
+        self.selection_details = self._readonly_text(self.selector, height=6)
+        self.selection_details.pack(fill="both", expand=True)
+        controls = ttk.Frame(self.selector)
+        controls.pack(fill="x", pady=(12, 0))
+        ttk.Button(controls, text="Refresh", command=self._refresh_models).pack(side="left")
+        ttk.Button(controls, text="Cancel", command=self.on_close).pack(side="right")
+        self.open_button = ttk.Button(controls, text="Open Boxxy", command=self._open_main)
+        self.open_button.pack(side="right", padx=8)
+        self._refresh_models()
+
+    def _refresh_models(self):
+        selected = self.model_var.get()
+        self.available_models = {}
+        try:
+            models, rejected = discover_models(self.models_dir)
+        except OSError as error:
+            self.selection_status.set(f"Unable to read the models folder: {error}")
+            self._set_text(self.selection_details, "Create the models folder and download a model, then Refresh.")
+        else:
+            self.available_models = {path.name: path for path in models}
+            self.selection_status.set(
+                f"Found {len(models)} local model(s). Select one to continue."
+                if models else "No complete local models found. Download a model, then Refresh."
+            )
+            self._set_text(
+                self.selection_details,
+                "Skipped folders:\n" + "\n".join(rejected) if rejected
+                else "Local files checked. Compatibility is verified when the selected model loads.",
+            )
+        names = list(self.available_models)
+        self.model_picker.configure(values=names)
+        preferred = Path(self.model_path).name if self.model_path else ""
+        self.model_var.set(selected if selected in names else preferred if preferred in names else names[0] if names else "")
+        self.open_button.configure(state="normal" if names else "disabled")
+
+    def _open_main(self):
+        if self.main_open:
+            return
+        path = self.available_models.get(self.model_var.get())
+        if path is None:
+            self._show_error("Invalid model", "Select a complete model from the list.")
+            return
+        try:
+            validate_model(path)
+        except (OSError, ValueError) as error:
+            self._refresh_models()
+            self._show_error("Invalid model", str(error))
+            return
+        self.model_path = str(path)
+        self.selector.destroy()
+        self.root.title(f"Boxxy - {path.name}")
+        self.root.geometry("1200x800")
+        self.root.minsize(700, 450)
+        self._build_toolbar(self.test_url)
         self._build_error_bar()
         self._build_status_bar()
         self._build_main_panes()
 
+        self.main_open = True
         logger.add_listener(self._on_log)
         self._install_exception_hooks()
+        self.root.after(0, self._poll_events)
+        self.root.after(50, self.load_model_async)
 
     # ------------------------------------------------------------------ layout
 
@@ -232,6 +310,9 @@ class BoxxyGui:
         self._show_error("GUI error", text)
 
     def _show_error(self, title, details):
+        if not self.main_open:
+            messagebox.showerror(title, details, parent=self.root)
+            return
         try:
             summary = (details or "").strip().splitlines()
             last_line = summary[-1] if summary else ""
@@ -492,8 +573,6 @@ class BoxxyGui:
             pass
 
     def run(self):
-        self.root.after(0, self._poll_events)
-        self.root.after(50, self.load_model_async)
         while not self.closed:
             try:
                 self.root.mainloop()

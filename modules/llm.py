@@ -66,7 +66,7 @@ class LLM:
         return self.processor.decode(outputs[0][input_len:], skip_special_tokens=False)
 
     def _parse_response(self, response):
-        parsed_response = self.processor.parse_response(response)
+        parsed_response = self.processor.parse_response(response, prefix="")
 
         thoughts = parsed_response.get("thinking", "")
         text = parsed_response.get("content", "")
