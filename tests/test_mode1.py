@@ -1,6 +1,7 @@
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
+from modules.browser import Browser
 from modules.mode1 import Mode1
 
 
@@ -21,9 +22,13 @@ class FakeBrowser:
         self.type_count = 0
         self.selections = []
         self.snapshot = 'button "Continue"'
+        self.page = {"url": "https://example.test/", "title": "Example"}
 
     def explore_view(self):
         return self.snapshot
+
+    def page_info(self):
+        return self.page
 
     def click(self, element):
         self.click_count += 1
@@ -89,7 +94,11 @@ class Mode1RecoveryTests(unittest.TestCase):
             mode.explore()
 
         self.assertIn("LookupError: target is no longer available", str(llm.calls[1]))
-        self.assertNotIn("target is no longer available", str(llm.calls[2]))
+        # The one-off retry feedback is transient, but the failure stays in the progress log as history.
+        self.assertIn("The previous browser action did not succeed", str(llm.calls[1]))
+        self.assertNotIn("The previous browser action did not succeed", str(llm.calls[2]))
+        self.assertIn("Recent failed actions", llm.calls[2][2]["content"])
+        self.assertIn("Step 1 on", llm.calls[2][2]["content"])
         self.assertNotIn("target is no longer available", str(mode.messages))
         self.assertNotIn("I will click Continue.", str(mode.messages))
         self.assertEqual(mode.browser.click_count, 1)
@@ -199,7 +208,8 @@ class Mode1RecoveryTests(unittest.TestCase):
             mode.explore()
 
         self.assertEqual(mode.browser.selections, [('combobox "Order list:"', "Alphabetically (A-Z)")])
-        self.assertIn("Browser action succeeded: perform_select_option", str(mode.messages))
+        self.assertEqual(mode.steps[0]["result"], 'Selected Alphabetically (A-Z) in combobox "Order list:"')
+        self.assertIn('result: Selected Alphabetically (A-Z) in combobox "Order list:"', str(llm.calls[1]))
 
     def test_guidance_groups_combobox_options(self):
         llm = FakeLLM([response(text="Done."), response(text="Done."), response(text="Done.")])
@@ -226,6 +236,216 @@ class Mode1RecoveryTests(unittest.TestCase):
         self.assertIn('button "Continue"', usable)
         self.assertIn('combobox "Order list:" options: "As entered" [selected], "Alphabetically (A-Z)"', dropdowns)
         self.assertIn('combobox "Sort by:" options: (not listed)', dropdowns)
+
+
+class Mode1ProgressTests(unittest.TestCase):
+    def make_mode(self, llm, browser, **kwargs):
+        mode = Mode1("https://example.test", llm=llm, **kwargs)
+        mode.browser = browser
+        mode.MAX_NO_PROGRESS_TURNS = 1
+        return mode
+
+    @staticmethod
+    def progress(call):
+        return next(m["content"] for m in call if m["content"].startswith("Progress so far."))
+
+    def test_progress_report_shows_goal_page_intent_result_and_changes(self):
+        llm = FakeLLM([
+            response([{
+                "function": {
+                    "name": "perform_click",
+                    "arguments": {"element": 'button "Add Element"', "intent": "Open the element picker"},
+                }
+            }]),
+            response(text="Done."),
+            response(text="Report."),
+        ])
+        browser = FakeBrowser()
+        browser.snapshot = 'button "Add Element"'
+        browser.page = {"url": "https://example.test/builder", "title": "Form builder"}
+        mode = self.make_mode(llm, browser, goal="Build a pasta survey.")
+
+        with patch("modules.mode1.log"):
+            mode.explore()
+
+        first = self.progress(llm.calls[0])
+        self.assertIn("Goal: Build a pasta survey.", first)
+        self.assertIn("Completed steps: none yet", first)
+        self.assertIn('page "Form builder" (https://example.test/builder)', str(llm.calls[0]))
+
+        second = self.progress(llm.calls[1])
+        self.assertIn('Step 1 on "Form builder" (https://example.test/builder)', second)
+        self.assertIn("intent: Open the element picker", second)
+        self.assertIn('result: Clicked button "Add Element"', second)
+        self.assertIn('appeared: dialog "Add element"', second)
+        self.assertIn('disappeared: button "Add Element"', second)
+
+        # The final report is grounded in the same progress log.
+        self.assertIn("intent: Open the element picker", self.progress(llm.calls[2]))
+        self.assertEqual(len(mode.messages), 2)
+
+    def test_intent_does_not_bypass_repeated_failure_block(self):
+        def failing_click(intent):
+            return {"function": {"name": "perform_click",
+                                 "arguments": {"element": 'button "Continue"', "intent": intent}}}
+
+        llm = FakeLLM([
+            response([failing_click("Move on")]),
+            response([failing_click("Try moving on again")]),
+            response(text="Report."),
+        ])
+        mode = self.make_mode(llm, FakeBrowser(fail_first_click=True))
+        mode.MAX_NO_PROGRESS_TURNS = 2
+
+        with patch("modules.mode1.log"):
+            mode.explore()
+
+        self.assertEqual(mode.browser.click_count, 1)
+        self.assertIn("already failed while the page was in this unchanged state", str(llm.calls[2]))
+        self.assertIn("(intent: Move on)", self.progress(llm.calls[1]))
+
+    def test_older_steps_are_summarized_and_failures_capped(self):
+        mode = Mode1("https://example.test", llm=FakeLLM([]))
+        mode.browser = FakeBrowser()
+        with patch("modules.mode1.log"):
+            for number in range(1, mode.MAX_RECENT_STEPS + 4):
+                mode._record_step("perform_typing", {"intent": f"Fill field {number}"}, f"typed {number}",
+                                  "page", "a", "a")
+            for number in range(mode.MAX_RECORDED_FAILURES + 3):
+                mode._record_failure("page", {}, f"failure {number}")
+            report = mode._progress_report()
+
+        earlier, _, recent = report.partition("Most recent steps:")
+        self.assertIn("Step 1: Fill field 1 -> typed 1", earlier)
+        self.assertNotIn("Step 1 on", recent)
+        self.assertIn(f"Step {mode.MAX_RECENT_STEPS + 3} on page", recent)
+        self.assertEqual(len(mode.failures), mode.MAX_RECORDED_FAILURES)
+        self.assertNotIn("failure 0", report)
+        self.assertIn(f"failure {mode.MAX_RECORDED_FAILURES + 2}", report)
+
+
+def progress_call(**arguments):
+    return {"function": {"name": "update_progress", "arguments": arguments}}
+
+
+class Mode1NotesTests(unittest.TestCase):
+    def make_mode(self, llm, browser=None):
+        mode = Mode1("https://example.test", llm=llm)
+        mode.browser = browser or FakeBrowser()
+        mode.MAX_NO_PROGRESS_TURNS = 1
+        return mode
+
+    def test_plan_and_findings_are_shown_in_later_turns_and_report(self):
+        llm = FakeLLM([
+            # Notes listed after the browser action must still be applied.
+            response([
+                {"function": {"name": "perform_click",
+                              "arguments": {"element": 'button "Continue"', "intent": "Start a form"}}},
+                progress_call(plan=["Create a blank form", "Add a title", "Add a dropdown"]),
+            ]),
+            response([
+                typing_call(),
+                progress_call(done=["[ ] create a blank form"], finding="Continue button has no visible focus ring"),
+            ]),
+            response(text="Done."),
+            response(text="Report."),
+        ])
+        mode = self.make_mode(llm)
+
+        with patch("modules.mode1.log"):
+            mode.explore()
+
+        self.assertEqual(mode.browser.click_count, 1)
+        self.assertIn("Your plan: none yet", llm.calls[0][2]["content"])
+        self.assertIn("[ ] Create a blank form\n[ ] Add a title\n[ ] Add a dropdown", llm.calls[1][2]["content"])
+        later = llm.calls[2][2]["content"]
+        self.assertIn("[x] Create a blank form\n[ ] Add a title", later)
+        self.assertIn("- Continue button has no visible focus ring", later)
+        self.assertIn("- Continue button has no visible focus ring", str(llm.calls[3]))
+        self.assertEqual(len(mode.steps), 2)
+
+    def test_notes_only_turn_is_not_progress_and_gets_specific_feedback(self):
+        llm = FakeLLM([
+            response([progress_call(plan=["Add a title"])]),
+            response(text="Report."),
+        ])
+        mode = self.make_mode(llm)
+
+        with patch("modules.mode1.log"):
+            mode.explore()
+
+        self.assertEqual(mode.steps, [])
+        self.assertEqual(mode.browser.click_count, 0)
+        self.assertIn("Your progress notes were saved, but no browser action was performed", str(llm.calls[1]))
+
+    def test_replacing_plan_keeps_done_items_and_caps_lists(self):
+        mode = self.make_mode(FakeLLM([]))
+        with patch("modules.mode1.log"):
+            mode._update_progress({"plan": ["Add a title", "Add a dropdown"], "done": "Add a title"})
+            mode._update_progress({"plan": ["Add a title.", "Add a checkbox", "Add a dropdown"]})
+            mode._update_progress({"done": ["Publish the form"]})
+            mode._update_progress({"plan": "not a list but a string"})
+            for number in range(mode.MAX_FINDINGS + 2):
+                mode._update_progress({"finding": f"finding {number}"})
+            mode._update_progress({"finding": f"finding {mode.MAX_FINDINGS + 1}"})
+            mode._update_progress("garbage")
+
+        self.assertEqual(mode.plan, [{"text": "not a list but a string", "done": False}])
+        self.assertEqual(len(mode.findings), mode.MAX_FINDINGS)
+        self.assertEqual(mode.findings[-1], f"finding {mode.MAX_FINDINGS + 1}")
+
+        mode.plan = []
+        with patch("modules.mode1.log"):
+            mode._update_progress({"plan": ["Add a title", "Add a dropdown"], "done": "Add a title"})
+            mode._update_progress({"plan": ["Add a title.", "Add a checkbox", "Add a dropdown"]})
+            mode._update_progress({"done": ["Publish the form"]})
+        self.assertEqual(mode.plan, [
+            {"text": "Add a title.", "done": True},
+            {"text": "Add a checkbox", "done": False},
+            {"text": "Add a dropdown", "done": False},
+            {"text": "Publish the form", "done": True},
+        ])
+
+    def test_progress_and_prompt_callbacks_receive_what_is_sent(self):
+        llm = FakeLLM([
+            response([typing_call(), progress_call(plan=["Add a title"], done=["Add a title"])]),
+            response(text="Done."),
+            response(text="Report."),
+        ])
+        progress_updates, prompts = [], []
+        mode = Mode1("https://example.test", llm=llm, on_progress=progress_updates.append, on_prompt=prompts.append)
+        mode.browser = FakeBrowser()
+        mode.MAX_NO_PROGRESS_TURNS = 1
+
+        with patch("modules.mode1.log"):
+            mode.explore()
+
+        self.assertEqual(prompts, llm.calls)
+        self.assertEqual(progress_updates[0], llm.calls[0][2]["content"])
+        # The post-turn refresh shows the step and checklist before the next prompt is built.
+        self.assertIn("[x] Add a title", progress_updates[1])
+        self.assertIn("Step 1 on", progress_updates[1])
+        self.assertEqual(progress_updates[-1], llm.calls[-1][2]["content"])
+
+
+class BrowserTypeTests(unittest.TestCase):
+    def make_browser(self, value):
+        browser = Browser("https://example.test")
+        browser.browser = MagicMock()
+        browser.page = MagicMock()
+        browser.page.get_by_role.return_value.input_value.return_value = value
+        return browser
+
+    def test_type_reports_matching_value(self):
+        browser = self.make_browser("Pasta quality")
+        result = browser.type('textbox "Form title"', "Pasta quality")
+        browser.page.get_by_role.assert_called_with("textbox", name="Form title")
+        self.assertTrue(result.endswith("the field now contains exactly that text"))
+
+    def test_type_reports_value_that_differs(self):
+        browser = self.make_browser("Pasta")
+        result = browser.type('textbox "Form title"', "Pasta quality")
+        self.assertIn('the field now contains "Pasta" (differs from what was typed)', result)
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@ the UI exclusively through a queue that the Tk main loop polls.
 """
 
 import queue
+import re
 import sys
 import threading
 import time
@@ -148,15 +149,67 @@ class BoxxyGui:
         tree_inner.columnconfigure(0, weight=1)
         panes.add(tree_frame, weight=1)
 
-        # Right: activity log.
-        log_frame = ttk.Labelframe(panes, text="Boxxy Activity Log", padding=4)
-        self.log_text = ScrolledText(log_frame, wrap="word", state="disabled", height=10)
+        # Right: progress block on top, then the activity log / instructions view below.
+        right = ttk.PanedWindow(panes, orient="vertical")
+        panes.add(right, weight=1)
+
+        progress_frame = ttk.Labelframe(right, text="Boxxy Progress", padding=4)
+        self.progress_updated_var = tk.StringVar(value="No progress yet.")
+        ttk.Label(progress_frame, textvariable=self.progress_updated_var, foreground="#555").pack(
+            side="top", anchor="w"
+        )
+        self.progress_text = self._readonly_text(progress_frame, height=12)
+        self.progress_text.tag_configure("heading", font=("TkDefaultFont", 12, "bold"))
+        self.progress_text.tag_configure("done", foreground="#15803d")
+        self.progress_text.tag_configure("todo", foreground="#92400e")
+        self.progress_text.tag_configure("failure", foreground="#b91c1c")
+        self.progress_text.pack(fill="both", expand=True)
+        right.add(progress_frame, weight=1)
+
+        output_frame = ttk.Labelframe(right, text="Boxxy Output", padding=4)
+        controls = ttk.Frame(output_frame)
+        controls.pack(side="top", fill="x", pady=(0, 4))
+        self.output_view_var = tk.StringVar(value="log")
+        for label, value in (("Activity Log", "log"), ("Current Instructions", "prompt")):
+            ttk.Radiobutton(
+                controls, text=label, value=value, variable=self.output_view_var, command=self._show_output_view
+            ).pack(side="left", padx=(0, 8))
+        self.prompt_updated_var = tk.StringVar(value="")
+        ttk.Label(controls, textvariable=self.prompt_updated_var, foreground="#555").pack(side="right")
+
+        self.output_body = ttk.Frame(output_frame)
+        self.output_body.pack(side="top", fill="both", expand=True)
+
+        self.log_view = ttk.Frame(self.output_body)
+        self.log_text = self._readonly_text(self.log_view, height=10)
         self.log_text.pack(fill="both", expand=True)
         self.log_text.tag_configure("time", foreground="#888")
         self.log_text.tag_configure("error", foreground="#b91c1c")
         self.log_text.tag_configure("separator", foreground="#aaa")
-        ttk.Button(log_frame, text="Clear Log", command=self._clear_log).pack(side="bottom", anchor="e", pady=(4, 0))
-        panes.add(log_frame, weight=1)
+        ttk.Button(self.log_view, text="Clear Log", command=self._clear_log).pack(
+            side="bottom", anchor="e", pady=(4, 0)
+        )
+
+        self.prompt_view = ttk.Frame(self.output_body)
+        self.prompt_text = self._readonly_text(self.prompt_view, height=10)
+        self.prompt_text.tag_configure("role", foreground="#1d4ed8", font=("TkDefaultFont", 11, "bold"))
+        self.prompt_text.pack(fill="both", expand=True)
+        self._set_text(self.prompt_text, "No instructions have been sent to the model yet.")
+
+        self._show_output_view()
+        right.add(output_frame, weight=2)
+
+    @staticmethod
+    def _readonly_text(parent, height):
+        return ScrolledText(parent, wrap="word", state="disabled", height=height)
+
+    def _show_output_view(self):
+        show, hide = (
+            (self.prompt_view, self.log_view) if self.output_view_var.get() == "prompt"
+            else (self.log_view, self.prompt_view)
+        )
+        hide.pack_forget()
+        show.pack(fill="both", expand=True)
 
     # --------------------------------------------------------- error handling
 
@@ -227,6 +280,10 @@ class BoxxyGui:
             self.status_var.set(payload[0])
         elif kind == "snapshot":
             self._update_tree(payload[0])
+        elif kind == "progress":
+            self._update_progress(payload[0])
+        elif kind == "prompt":
+            self._update_prompt(payload[0])
         elif kind == "error":
             self._show_error(*payload)
         elif kind == "model_loaded":
@@ -266,6 +323,48 @@ class BoxxyGui:
         self.log_text.configure(state="normal")
         self.log_text.delete("1.0", "end")
         self.log_text.configure(state="disabled")
+
+    @staticmethod
+    def _set_text(widget, segments):
+        """Replace a read-only text widget's contents, keeping the scroll position. segments: str or [(text, tag)]."""
+        if isinstance(segments, str):
+            segments = [(segments, None)]
+        top = widget.yview()[0]
+        widget.configure(state="normal")
+        widget.delete("1.0", "end")
+        for text, tag in segments:
+            widget.insert("end", text, (tag,) if tag else ())
+        widget.configure(state="disabled")
+        widget.yview_moveto(top)
+
+    @staticmethod
+    def _progress_line_tag(line):
+        if line.startswith("[x]"):
+            return "done"
+        if line.startswith("[ ]"):
+            return "todo"
+        if line.startswith("On "):
+            return "failure"
+        if line.startswith(("Progress so far", "Goal:")) or line.endswith(":") or re.match(r"Step \d+ on ", line):
+            return "heading"
+        return None
+
+    def _update_progress(self, progress):
+        segments = [(line + "\n", self._progress_line_tag(line)) for line in (progress or "").splitlines()]
+        self._set_text(self.progress_text, segments)
+        self.progress_updated_var.set(f"Last updated {datetime.now().strftime('%H:%M:%S')}")
+
+    def _update_prompt(self, messages):
+        segments = []
+        for index, message in enumerate(messages or [], start=1):
+            role = message.get("role", "?") if isinstance(message, dict) else "?"
+            content = message.get("content", "") if isinstance(message, dict) else message
+            segments.append((f"── {index}. {role} ──\n", "role"))
+            segments.append((f"{content}\n\n", None))
+        self._set_text(self.prompt_text, segments)
+        self.prompt_updated_var.set(
+            f"{len(messages or [])} messages · sent {datetime.now().strftime('%H:%M:%S')}"
+        )
 
     def _update_tree(self, snapshot):
         self.tree.delete(*self.tree.get_children())
@@ -356,6 +455,9 @@ class BoxxyGui:
                 url,
                 llm=self.llm,
                 on_snapshot=lambda snapshot: self.post("snapshot", snapshot),
+                on_progress=lambda progress: self.post("progress", progress),
+                # Copy so later mutation in the worker can't race with the UI thread rendering it.
+                on_prompt=lambda messages: self.post("prompt", [dict(message) for message in messages]),
                 stop_event=self.stop_event,
             )
             boxxy.launch()

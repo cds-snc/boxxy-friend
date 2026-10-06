@@ -40,6 +40,16 @@ class Browser:
 
         return self.page.aria_snapshot()
 
+    def page_info(self):
+        if self.browser is None:
+            raise Exception("Browser is not open. Call open() first.")
+
+        try:
+            title = self.page.title()
+        except Exception:
+            title = ""  # title() can fail mid-navigation; the URL is still useful on its own.
+        return {"url": self.page.url, "title": title}
+
     # Matches ARIA snapshot node lines like: button "Design a form Start with a blank form."
     _ROLE_NAME_RE = re.compile(r'^\s*([a-zA-Z]+)\s+"(.*)"\s*$')
 
@@ -130,19 +140,26 @@ class Browser:
         if self.browser is None:
             raise Exception("Browser is not open. Call open() first.")
 
-        result = ""
-
         match = self._ROLE_NAME_RE.match(element)
         if match:
             role, name = match.group(1), match.group(2)
             result = f'I typed into role "{role}" with name "{name}" : "{text}"'
-            self.page.get_by_role(role, name=name).fill(text)
+            locator = self.page.get_by_role(role, name=name)
         else:
-            result = f'I typed into element with text: "{element} " : "{text}"'
-            self.page.get_by_text(element).fill(text)
+            result = f'I typed into element with text: "{element}" : "{text}"'
+            locator = self.page.get_by_text(element)
+        locator.fill(text)
 
         self.page.wait_for_timeout(1000) # let the typing event actually do something.
-        return result
+
+        # Read the value back so the agent learns whether the field kept the text (masks, max lengths, resets).
+        try:
+            value = locator.input_value()
+        except Exception:
+            return result
+        if value == text:
+            return result + "; the field now contains exactly that text"
+        return result + f'; the field now contains "{value}" (differs from what was typed)'
     
     def click(self, element):
         if self.browser is None:
