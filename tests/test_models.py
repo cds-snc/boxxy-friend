@@ -1,11 +1,12 @@
 import json
+import struct
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from modules.gui import BoxxyGui
-from modules.models import discover_models, validate_model
+from modules.models import discover_models, resolve_gguf, validate_model
 
 
 class ModelDiscoveryTests(unittest.TestCase):
@@ -26,6 +27,69 @@ class ModelDiscoveryTests(unittest.TestCase):
         (path / "tokenizer.json").write_text("{}", encoding="utf-8")
         (path / "model.safetensors").write_bytes(b"weights")
         return path
+
+    def make_gguf(self, path):
+        path.write_bytes(struct.pack("<4sIQQ", b"GGUF", 3, 1, 1) + b"model data")
+        return path
+
+    def test_gguf_requires_no_json_or_tokenizer_files(self):
+        folder = self.models_dir / "gguf-model"
+        folder.mkdir()
+        model = self.make_gguf(folder / "model.gguf")
+        validate_model(folder)
+        validate_model(model)
+        self.assertEqual(resolve_gguf(folder), model)
+        self.assertEqual(discover_models(self.models_dir), ([model], []))
+
+    def test_multiple_quantizations_and_top_level_ggufs_are_listed(self):
+        folder = self.models_dir / "alpha"
+        folder.mkdir()
+        second = self.make_gguf(folder / "Q8.gguf")
+        first = self.make_gguf(folder / "Q4.GGUF")
+        third = self.make_gguf(self.models_dir / "zulu.gguf")
+        self.make_gguf(self.models_dir / ".hidden.gguf")
+        self.assertEqual(discover_models(self.models_dir), ([first, second, third], []))
+        with self.assertRaisesRegex(ValueError, "select a specific GGUF file"):
+            resolve_gguf(folder)
+
+    def test_transformers_folder_with_gguf_keeps_both_formats_selectable(self):
+        folder = self.make_model()
+        model = self.make_gguf(folder / "model.gguf")
+        self.assertIsNone(resolve_gguf(folder))
+        validate_model(folder)
+        self.assertEqual(discover_models(self.models_dir), ([folder, model], []))
+
+    def test_invalid_empty_and_truncated_ggufs_are_rejected(self):
+        model = self.models_dir / "bad.gguf"
+        for data in (
+            b"", b"not a model", b"GGUF",
+            struct.pack("<4sIQQ", b"GGUF", 1, 1, 1) + b"data",
+            struct.pack("<4sIQQ", b"GGUF", 3, 0, 1) + b"data",
+            struct.pack("<4sIQQ", b"GGUF", 3, 1, 0) + b"data",
+            struct.pack("<4sIQQ", b"GGUF", 3, 1, 1),
+        ):
+            with self.subTest(data=data):
+                model.write_bytes(data)
+                with self.assertRaises(ValueError):
+                    validate_model(model)
+                models, rejected = discover_models(self.models_dir)
+                self.assertEqual(models, [])
+                self.assertIn("bad.gguf:", rejected[0])
+        model.write_bytes(struct.pack("<4sIQQ", b"GGUF", 2, 1, 1) + b"data")
+        validate_model(model)
+
+    def test_split_and_projection_ggufs_report_explicit_reasons(self):
+        for name, reason in (
+            ("mmproj-model.gguf", "not standalone"),
+            ("model-00001-of-00002.gguf", "Split GGUF"),
+        ):
+            with self.subTest(name=name):
+                model = self.make_gguf(self.models_dir / name)
+                with self.assertRaisesRegex(ValueError, reason):
+                    validate_model(model)
+        models, rejected = discover_models(self.models_dir)
+        self.assertEqual(models, [])
+        self.assertEqual(len(rejected), 2)
 
     def test_lists_complete_models_sorted_and_reports_incomplete_folders(self):
         second = self.make_model("Zulu")
@@ -153,6 +217,23 @@ class ModelSelectorTests(unittest.TestCase):
         self.assertTrue(gui.closed)
         gui.root.destroy.assert_called_once()
         load.assert_not_called()
+
+    def test_refresh_keeps_same_named_quantizations_distinct(self):
+        gui = self.make_gui()
+        gui.models_dir = Path("/models")
+        gui.model_path = "/models/second/model.gguf"
+        gui.model_picker = MagicMock()
+        gui.selection_status = MagicMock()
+        gui.selection_details = MagicMock()
+        gui.open_button = MagicMock()
+        models = [Path("/models/first/model.gguf"), Path("/models/second/model.gguf")]
+        with patch("modules.gui.discover_models", return_value=(models, [])):
+            gui._refresh_models()
+        self.assertEqual(gui.available_models, {
+            "first/model.gguf": models[0],
+            "second/model.gguf": models[1],
+        })
+        gui.model_var.set.assert_called_once_with("second/model.gguf")
 
 
 if __name__ == "__main__":

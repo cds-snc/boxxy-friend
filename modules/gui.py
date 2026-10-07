@@ -116,7 +116,7 @@ class BoxxyGui:
             self.selection_status.set(f"Unable to read the models folder: {error}")
             self._set_text(self.selection_details, "Create the models folder and download a model, then Refresh.")
         else:
-            self.available_models = {path.name: path for path in models}
+            self.available_models = {str(path.relative_to(self.models_dir)): path for path in models}
             self.selection_status.set(
                 f"Found {len(models)} local model(s). Select one to continue."
                 if models else "No complete local models found. Download a model, then Refresh."
@@ -128,7 +128,11 @@ class BoxxyGui:
             )
         names = list(self.available_models)
         self.model_picker.configure(values=names)
-        preferred = Path(self.model_path).name if self.model_path else ""
+        preferred = ""
+        if self.model_path:
+            preferred_path = Path(self.model_path).resolve()
+            if preferred_path.is_relative_to(self.models_dir):
+                preferred = str(preferred_path.relative_to(self.models_dir))
         self.model_var.set(selected if selected in names else preferred if preferred in names else names[0] if names else "")
         self.open_button.configure(state="normal" if names else "disabled")
 

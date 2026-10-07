@@ -1,4 +1,5 @@
 huggingface_hub
+llama-cpp-python>=0.3.16
 playwright
 torch
 transformers>=5.5.0
