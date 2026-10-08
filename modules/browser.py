@@ -191,10 +191,10 @@ class Browser:
         if match:
             role, name = match.group(1), match.group(2)
             result = f'I clicked on role "{role}" with name "{name}"'
-            self.page.get_by_role(role, name=name).click()
+            self.page.get_by_role(role, name=name).nth(0).click()
         else:
             result = f'I clicked on element with text: "{element}"'
-            self.page.get_by_text(element).click()
+            self.page.get_by_text(element).nth(0).click()
 
         self.page.wait_for_timeout(1000) # let the click event actually do something.
         return result
