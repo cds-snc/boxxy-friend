@@ -57,7 +57,17 @@ class Browser:
     # <select> with nested options) or ": <current value>" (custom ARIA comboboxes).
     _LOOSE_ROLE_NAME_RE = re.compile(r'^\s*(?:-\s+)?([a-zA-Z]+)\s+"((?:[^"\\]|\\.)*)"')
 
+    @staticmethod
+    def _clean_element(element):
+        # Only clean ARIA name delimiters, not backslashes or punctuation inside names.
+        return re.sub(
+            r'^(\s*(?:-\s+)?[a-zA-Z]+\s+)\\?"(.*?)\\?"(\s*(?::.*|\[.*)?)\s*,?\s*$',
+            r'\1"\2"\3',
+            element,
+        )
+
     def _locate_by_role_or_text(self, element):
+        element = self._clean_element(element)
         match = self._LOOSE_ROLE_NAME_RE.match(element)
         if not match:
             return self.page.get_by_text(element), f'element with text "{element}"'
@@ -70,6 +80,7 @@ class Browser:
     @classmethod
     def _option_label(cls, value):
         # Accept the option copied verbatim from the snapshot, e.g. option "As entered" [selected].
+        value = cls._clean_element(value)
         match = cls._LOOSE_ROLE_NAME_RE.match(value)
         if match and match.group(1) == "option":
             return match.group(2)
@@ -140,6 +151,7 @@ class Browser:
         if self.browser is None:
             raise Exception("Browser is not open. Call open() first.")
 
+        element = self._clean_element(element)
         match = self._ROLE_NAME_RE.match(element)
         if match:
             role, name = match.group(1), match.group(2)
@@ -165,6 +177,7 @@ class Browser:
         if self.browser is None:
             raise Exception("Browser is not open. Call open() first.")
 
+        element = self._clean_element(element)
         result = ""
         # `element` is typically a line from the ARIA tree/snapshot, e.g.:
         #   button "Design a form Start with a blank form."
