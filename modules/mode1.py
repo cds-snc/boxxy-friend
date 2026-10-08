@@ -44,6 +44,7 @@ class Mode1:
         self.test_url = test_url
         self.goal = goal or self.DEFAULT_GOAL
         self.steps = []
+        self._step_count = 0
         self.failures = []
         # Agent-maintained notes: a checklist of sub-goals and observed findings (bugs, accessibility issues).
         self.plan = []
@@ -73,7 +74,7 @@ class Mode1:
         "trying reasonable actions until the form is visibly complete or you can identify a concrete blocker. " \
         "Every tool call must include an 'intent' argument: one short sentence saying why you are taking the " \
         "action and which part of the goal it advances. Each turn you receive a 'Progress so far' section with " \
-        "the goal, the steps you already completed (with their intent, result and how the page changed) and " \
+        "the steps you already completed (with their intent, result and how the page changed) and " \
         "recent failures. Use it to decide what remains to be done: do not redo completed steps and do not " \
         "retry actions that already failed unless the page has changed. " \
         "Keep your own notes with the update_progress tool: at the start, write a plan of the sub-goals needed to " \
@@ -380,15 +381,16 @@ class Mode1:
         return "The ARIA snapshot changed. " + (" | ".join(parts) if parts else "Only ordering changed.")
 
     def _record_step(self, name, arguments, result, page, before, after):
+        self._step_count += 1
         step = {
-            "number": len(self.steps) + 1,
+            "number": self._step_count,
             "page": page,
             "intent": self._intent(arguments),
-            "action": self._action_signature(name, arguments),
             "result": result or self._action_signature(name, arguments),
             "changes": self._snapshot_changes(before, after),
         }
         self.steps.append(step)
+        del self.steps[:-(self.MAX_RECENT_STEPS + self.MAX_EARLIER_STEPS)]
         log(f"Step {step['number']}: {step['intent']} -> {step['result']}. {step['changes']}")
 
     def _record_failure(self, page, arguments, error):
@@ -462,17 +464,17 @@ class Mode1:
         return parts
 
     def _progress_report(self):
-        parts = [f"Progress so far.\nGoal: {self.goal}"]
+        parts = ["Progress so far."]
         parts += self._notes_report()
 
-        if not self.steps:
+        if not self._step_count:
             parts.append("Completed steps: none yet. This is the first action.")
         else:
             recent = self.steps[-self.MAX_RECENT_STEPS:]
             earlier = self.steps[:-self.MAX_RECENT_STEPS]
             if earlier:
                 shown = earlier[-self.MAX_EARLIER_STEPS:]
-                omitted = len(earlier) - len(shown)
+                omitted = self._step_count - len(self.steps)
                 summary = [f"({omitted} older steps omitted)"] if omitted else []
                 summary += [
                     f"Step {step['number']}: {self._truncate(step['intent'] + ' -> ' + step['result'])}"
@@ -585,6 +587,7 @@ class Mode1:
             {"role": "user", "content": self.goal},
         ]
         self.steps = []
+        self._step_count = 0
         self.failures = []
         self.plan = []
         self.findings = []

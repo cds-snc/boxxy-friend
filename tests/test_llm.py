@@ -48,7 +48,7 @@ class GGUFLoadingTests(unittest.TestCase):
                 ):
                     llm.load_model(str(path))
                 backend.Llama.assert_called_once_with(
-                    model_path=str(self.path), n_ctx=8192, n_gpu_layers=-1, verbose=False
+                    model_path=str(self.path), n_ctx=32000, n_gpu_layers=-1, verbose=False
                 )
                 self.assertIs(llm.gguf_model, backend.Llama.return_value)
                 processor.from_pretrained.assert_not_called()
@@ -92,7 +92,7 @@ class GGUFGenerationTests(unittest.TestCase):
             "raw": "A haiku", "thoughts": "", "text": "A haiku", "tool_calls": [],
         })
         self.llm.gguf_model.create_chat_completion.assert_called_once_with(
-            messages=[{"role": "assistant", "content": "Earlier answer"}, *MESSAGES], max_tokens=1024
+            messages=[{"role": "assistant", "content": "Earlier answer"}, *MESSAGES], max_tokens=2048
         )
         self.assertEqual(messages[0]["role"], "model")
 

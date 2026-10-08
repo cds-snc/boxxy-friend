@@ -269,7 +269,11 @@ class Mode1ProgressTests(unittest.TestCase):
             mode.explore()
 
         first = self.progress(llm.calls[0])
-        self.assertIn("Goal: Build a pasta survey.", first)
+        self.assertNotIn("Goal: Build a pasta survey.", first)
+        self.assertEqual(
+            sum(message["content"] == "Build a pasta survey." for message in llm.calls[0]),
+            1,
+        )
         self.assertIn("Completed steps: none yet", first)
         self.assertIn('page "Form builder" (https://example.test/builder)', str(llm.calls[0]))
 
@@ -322,6 +326,24 @@ class Mode1ProgressTests(unittest.TestCase):
         self.assertEqual(len(mode.failures), mode.MAX_RECORDED_FAILURES)
         self.assertNotIn("failure 0", report)
         self.assertIn(f"failure {mode.MAX_RECORDED_FAILURES + 2}", report)
+
+    def test_successful_step_history_is_capped_to_reported_window(self):
+        mode = Mode1("https://example.test", llm=FakeLLM([]))
+        mode.browser = FakeBrowser()
+        total_steps = mode.MAX_EARLIER_STEPS + mode.MAX_RECENT_STEPS + 5
+        with patch("modules.mode1.log"):
+            for number in range(1, total_steps + 1):
+                mode._record_step("perform_typing", {"intent": f"Fill field {number}"}, f"typed {number}",
+                                  "page", "a", "a")
+            report = mode._progress_report()
+
+        self.assertEqual(len(mode.steps), mode.MAX_EARLIER_STEPS + mode.MAX_RECENT_STEPS)
+        self.assertEqual(mode.steps[0]["number"], 6)
+        self.assertEqual(mode.steps[-1]["number"], total_steps)
+        self.assertNotIn("action", mode.steps[-1])
+        self.assertIn("(5 older steps omitted)", report)
+        self.assertNotIn("Step 1:", report)
+        self.assertIn(f"Step {total_steps} on page", report)
 
 
 def progress_call(**arguments):
