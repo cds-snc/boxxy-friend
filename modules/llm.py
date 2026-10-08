@@ -10,6 +10,7 @@ from modules.models import resolve_gguf, validate_gguf
 
 class LLM:
     MAX_PARSE_ATTEMPTS = 2
+    MAX_TOKENS=2048
 
     def __init__(self):
         self.model = None
@@ -126,7 +127,7 @@ class LLM:
 
         for attempt in range(self.MAX_PARSE_ATTEMPTS):
             completion = self.gguf_model.create_chat_completion(
-                messages=messages, max_tokens=1024, **options
+                messages=messages, max_tokens=self.MAX_TOKENS, **options
             )
             raw = completion["choices"][0]["message"]["content"]
             if not isinstance(raw, str):
@@ -180,7 +181,7 @@ class LLM:
         inputs = self.processor(text=text, return_tensors="pt").to(self.model.device)
         input_len = inputs["input_ids"].shape[1]
 
-        outputs = self.model.generate(**inputs, max_new_tokens=1024)
+        outputs = self.model.generate(**inputs, max_new_tokens=self.MAX_TOKENS)
         return self.processor.decode(outputs[0][input_len:], skip_special_tokens=False)
 
     def _parse_response(self, response):
