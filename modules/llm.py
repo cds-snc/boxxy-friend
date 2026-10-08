@@ -29,7 +29,7 @@ class LLM:
                 raise RuntimeError(
                     "GGUF models require llama-cpp-python. Install it with: pip install llama-cpp-python"
                 ) from error
-            model = Llama(model_path=str(gguf), n_ctx=8192, n_gpu_layers=-1, verbose=False)
+            model = Llama(model_path=str(gguf), n_ctx=32000, n_gpu_layers=-1, verbose=False)
             self.gguf_model = model
             self.model = None
             self.processor = None
