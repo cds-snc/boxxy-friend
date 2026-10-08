@@ -1,7 +1,50 @@
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from modules.browser import Browser
+from modules.window_layout import WindowBounds
+
+
+class BrowserWindowTests(unittest.TestCase):
+    @patch("modules.browser.sync_playwright")
+    def test_default_launch_is_unchanged(self, playwright):
+        browser = Browser("https://example.test")
+        browser.open()
+        chromium = playwright.return_value.start.return_value.chromium
+        chromium.launch.assert_called_once_with(headless=False)
+        chromium.launch.return_value.new_page.assert_called_once_with()
+        browser.page.goto.assert_called_once_with("https://example.test")
+
+    @patch("modules.browser.sync_playwright")
+    def test_positioned_launch_uses_native_window_and_responsive_viewport(self, playwright):
+        browser = Browser("https://example.test", WindowBounds(756, 33, 756, 862))
+        browser.open()
+        chromium = playwright.return_value.start.return_value.chromium
+        chromium.launch.assert_called_once_with(
+            headless=False, args=["--window-position=756,33", "--window-size=756,862"]
+        )
+        chromium.launch.return_value.new_page.assert_called_once_with(no_viewport=True)
+        session = browser.page.context.new_cdp_session.return_value
+        session.send.assert_any_call("Browser.setWindowBounds", {
+            "windowId": session.send.return_value["windowId"],
+            "bounds": {
+                "left": 756, "top": 33, "width": 756, "height": 862, "windowState": "normal",
+            },
+        })
+        session.detach.assert_called_once_with()
+        browser.page.set_default_timeout.assert_called_once_with(Browser.ACTION_TIMEOUT_MS)
+        browser.page.goto.assert_called_once_with("https://example.test")
+
+    @patch("modules.browser.sync_playwright")
+    def test_positioning_failure_is_propagated_and_session_detached(self, playwright):
+        browser = Browser("https://example.test", WindowBounds(756, 33, 756, 862))
+        page = playwright.return_value.start.return_value.chromium.launch.return_value.new_page.return_value
+        session = page.context.new_cdp_session.return_value
+        session.send.side_effect = RuntimeError("Cannot position window")
+        with self.assertRaisesRegex(RuntimeError, "Cannot position window"):
+            browser.open()
+        session.detach.assert_called_once_with()
+        page.goto.assert_not_called()
 
 
 class BrowserElementCleanupTests(unittest.TestCase):

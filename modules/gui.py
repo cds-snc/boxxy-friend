@@ -19,6 +19,7 @@ from tkinter.scrolledtext import ScrolledText
 
 from modules import logger
 from modules.models import DEFAULT_MODELS_DIR, discover_models, validate_model
+from modules.window_layout import desktop_bounds
 
 DEFAULT_TEST_URL = "https://forms-staging.cdssandbox.xyz/en/form-builder"
 
@@ -73,13 +74,24 @@ class BoxxyGui:
 
         self.root = tk.Tk()
         self.root.title("Boxxy - Select a model")
-        self.root.geometry("700x450")
-        self.root.minsize(600, 350)
+        self.gui_bounds, self.browser_bounds = desktop_bounds(
+            self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+        ).split()
+        self._position_window()
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         # Exceptions raised inside Tk callbacks are shown in the GUI instead of stderr.
         self.root.report_callback_exception = self._on_tk_exception
 
         self._build_model_selector()
+
+    def _position_window(self):
+        bounds = self.gui_bounds
+        self.root.geometry(f"{bounds.width}x{bounds.height}+{bounds.x}+{bounds.y}")
+        self.root.update_idletasks()
+        title_height = max(0, self.root.winfo_rooty() - self.root.winfo_y())
+        height = max(1, bounds.height - title_height)
+        self.root.minsize(min(600, bounds.width), min(350, height))
+        self.root.geometry(f"{bounds.width}x{height}+{bounds.x}+{bounds.y}")
 
     def _build_model_selector(self):
         self.selector = ttk.Frame(self.root, padding=20)
@@ -152,8 +164,7 @@ class BoxxyGui:
         self.model_path = str(path)
         self.selector.destroy()
         self.root.title(f"Boxxy - {path.name}")
-        self.root.geometry("1200x800")
-        self.root.minsize(700, 450)
+        self._position_window()
         self._build_toolbar(self.test_url)
         self._build_error_bar()
         self._build_status_bar()
@@ -280,6 +291,7 @@ class BoxxyGui:
 
         self._show_output_view()
         right.add(output_frame, weight=2)
+        self.root.after_idle(lambda: panes.sashpos(0, panes.winfo_width() // 2))
 
     @staticmethod
     def _readonly_text(parent, height):
@@ -544,6 +556,7 @@ class BoxxyGui:
                 # Copy so later mutation in the worker can't race with the UI thread rendering it.
                 on_prompt=lambda messages: self.post("prompt", [dict(message) for message in messages]),
                 stop_event=self.stop_event,
+                browser_bounds=self.browser_bounds,
             )
             boxxy.launch()
             boxxy.explore()

@@ -2,6 +2,7 @@ import json
 import re
 
 from modules.logger import log
+from modules.window_layout import WindowBounds
 
 
 class StopRequested(Exception):
@@ -35,7 +36,7 @@ class Mode1:
     _SNAPSHOT_ELEMENT_RE = re.compile(r'^\s*-\s+([a-z]+)\s+"((?:[^"\\]|\\.)*)"(.*)$')
 
     def __init__(self, test_url, local_path=None, llm=None, on_snapshot=None, stop_event=None, goal=None,
-                 on_progress=None, on_prompt=None):
+                 on_progress=None, on_prompt=None, browser_bounds: WindowBounds | None = None):
         # on_progress(text) receives the current progress block; on_prompt(messages) receives each prompt sent
         # to the LLM. Both are optional hooks for UIs and are called from the exploring thread.
         self.on_progress = on_progress
@@ -84,7 +85,7 @@ class Mode1:
         self.messages = []
 
         from modules.browser import Browser
-        self.browser = Browser(self.test_url)
+        self.browser = Browser(self.test_url, window_bounds=browser_bounds)
 
         if llm is None:
             from modules.llm import LLM

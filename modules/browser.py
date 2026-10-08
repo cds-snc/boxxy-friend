@@ -3,21 +3,47 @@ from playwright.async_api import async_playwright
 import asyncio
 import re
 from playwright.sync_api import sync_playwright
+from modules.window_layout import WindowBounds
 
 class Browser:
     # Short enough that a click blocked by an overlay fails fast instead of
     # waiting Playwright's default 30s for the element to become actionable.
     ACTION_TIMEOUT_MS = 5000
 
-    def __init__(self, base_url):
+    def __init__(self, base_url, window_bounds: WindowBounds | None = None):
         self.base_url = base_url
+        self.window_bounds = window_bounds
         self.browser = None
         self.playwright = None
 
     def open(self):
         self.playwright = sync_playwright().start()
-        self.browser = self.playwright.chromium.launch(headless=False)
-        self.page = self.browser.new_page()
+        if self.window_bounds is None:
+            self.browser = self.playwright.chromium.launch(headless=False)
+            self.page = self.browser.new_page()
+        else:
+            bounds = self.window_bounds
+            self.browser = self.playwright.chromium.launch(
+                headless=False,
+                args=[
+                    f"--window-position={bounds.x},{bounds.y}",
+                    f"--window-size={bounds.width},{bounds.height}",
+                ],
+            )
+            self.page = self.browser.new_page(no_viewport=True)
+            session = self.page.context.new_cdp_session(self.page)
+            try:
+                window = session.send("Browser.getWindowForTarget")
+                session.send("Browser.setWindowBounds", {
+                    "windowId": window["windowId"],
+                    "bounds": {
+                        "left": bounds.x, "top": bounds.y,
+                        "width": bounds.width, "height": bounds.height,
+                        "windowState": "normal",
+                    },
+                })
+            finally:
+                session.detach()
         self.page.set_default_timeout(self.ACTION_TIMEOUT_MS)
         self.page.goto(self.base_url)
 
