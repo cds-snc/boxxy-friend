@@ -5,6 +5,7 @@ from pathlib import Path
 from transformers import AutoProcessor, AutoModelForMultimodalLM
 from transformers.utils.chat_parsing_utils import recursive_parse
 
+from modules.logger import log
 from modules.models import resolve_gguf, validate_gguf
 
 
@@ -84,6 +85,8 @@ class LLM:
         ]
         options = {}
         if tools_schema:
+            names = {tool["function"]["name"] for tool in tools_schema}
+            max_calls = 2 if "update_progress" in names else 1
             call_schemas = []
             for tool in tools_schema:
                 function = tool["function"]
@@ -110,7 +113,11 @@ class LLM:
                     "properties": {
                         "thoughts": {"type": "string"},
                         "text": {"type": "string"},
-                        "tool_calls": {"type": "array", "items": {"oneOf": call_schemas}},
+                        "tool_calls": {
+                            "type": "array",
+                            "items": {"oneOf": call_schemas},
+                            "maxItems": max_calls,
+                        },
                     },
                     "required": ["thoughts", "text", "tool_calls"],
                     "additionalProperties": False,
@@ -121,6 +128,11 @@ class LLM:
                 "content": (
                     "Return only a JSON object with thoughts (string), text (string), and tool_calls (array). "
                     "Each tool call must be {\"function\": {\"name\": \"tool_name\", \"arguments\": {...}}}. "
+                    "Return at most ONE browser action and at most ONE update_progress call if that tool is "
+                    "available. Choose only the next action using the current ARIA snapshot, then stop: "
+                    "you will receive a fresh snapshot after it executes. Do not repeat actions or list future "
+                    "actions. Keep thoughts to one short sentence and each intent to one short sentence. "
+                    "Keep text brief or empty. "
                     "Use an empty array when no action is needed. Available tools:\n" + json.dumps(tools_schema)
                 ),
             })
@@ -149,7 +161,8 @@ class LLM:
                     or not isinstance(result.get("tool_calls"), list)
                 ):
                     raise ValueError("GGUF response must contain thoughts, text, and tool_calls")
-                names = {tool["function"]["name"] for tool in tools_schema}
+                action_count = 0
+                progress_count = 0
                 for call in result["tool_calls"]:
                     function = call.get("function") if isinstance(call, dict) else None
                     if (
@@ -159,14 +172,42 @@ class LLM:
                         or not isinstance(function.get("arguments"), dict)
                     ):
                         raise ValueError("GGUF response contains an invalid tool call")
+                    if function["name"] == "update_progress":
+                        progress_count += 1
+                    else:
+                        action_count += 1
+                if action_count > 1 or progress_count > 1:
+                    raise ValueError(
+                        "GGUF response must contain at most one browser action and one update_progress call"
+                    )
                 return {**result, "raw": raw}
-            except ValueError:
+            except ValueError as error:
+                log(
+                    f"GGUF response parsing failed (attempt {attempt + 1}/{self.MAX_PARSE_ATTEMPTS}): "
+                    f"{error}; finish_reason={completion['choices'][0].get('finish_reason', 'unknown')!r}; "
+                    f"usage={completion.get('usage')!r}; max_tokens={self.MAX_TOKENS}; "
+                    f"response_chars={len(raw)}; response_tail (last 500 characters)={raw[-500:]!r}"
+                )
                 if attempt == self.MAX_PARSE_ATTEMPTS - 1:
                     raise
-                messages.extend([
-                    {"role": "assistant", "content": raw},
-                    {"role": "user", "content": "The response was invalid. Return only JSON matching the schema."},
-                ])
+                reason = (
+                    "The previous response reached the output token limit before producing valid output. "
+                    if completion["choices"][0].get("finish_reason") == "length"
+                    else f"The previous response was invalid: {error}. "
+                )
+                messages = [
+                    *messages,
+                    {
+                        "role": "user",
+                        "content": reason + (
+                            "Return a much shorter, complete JSON object matching the schema. "
+                            "Include at most ONE browser action and at most ONE update_progress call if "
+                            "available. Choose only the next action from the current snapshot; do not repeat "
+                            "actions or list future actions. Keep thoughts and intents to one short sentence "
+                            "each and text brief or empty. Do not reproduce the previous response."
+                        ),
+                    },
+                ]
 
         raise RuntimeError("GGUF response generation exhausted without returning or raising")
 
