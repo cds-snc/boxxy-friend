@@ -1,6 +1,9 @@
 
-## Test the LLM
-local_path = "./models/gemma-4-E2B-it"
+from pathlib import Path
+
+from setup import DEFAULT_FILENAME, DEFAULT_OUTPUT_DIR
+
+local_path = Path(__file__).resolve().parent / DEFAULT_OUTPUT_DIR / DEFAULT_FILENAME
 
 from modules.llm import LLM
 
@@ -21,5 +24,6 @@ print(response)
 # Test the Playwright Browser
 from modules.browser import Browser
 
-browser = Browser()
+browser = Browser("https://example.com")
 browser.test_browser()
+print("Smoke test passed: model generated text and Chromium saved example.png.")

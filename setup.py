@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Download the Gemma 4 E2B ONNX model snapshot from Hugging Face.
+"""Download the default Ornith GGUF model from Hugging Face.
 
 Usage:
   python setup.py
-  python setup.py --repo-id onnx-community/gemma-4-E2B-it-ONNX --output-dir models/gemma-4-E2B-it-ONNX
+  python setup.py --help
 """
 
 from __future__ import annotations
@@ -14,13 +14,20 @@ import sys
 from pathlib import Path
 
 
-DEFAULT_REPO_ID = "google/gemma-4-E2B-it"
-DEFAULT_OUTPUT_DIR = "models/gemma-4-E2B-it"
+DEFAULT_REPO_ID = "ornith-ai/Ornith-1.5-9B-GGUF"
+DEFAULT_OUTPUT_DIR = "models"
+DEFAULT_FILENAME = "Ornith-1.5-9B-Q4_K_M.gguf"
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Download a Gemma 4 E2B model snapshot from Hugging Face."
+        description="Download the Ornith 1.5 9B Q4_K_M GGUF model from Hugging Face."
+    )
+    parser.add_argument(
+        "--allow-patterns",
+        nargs="+",
+        default=[DEFAULT_FILENAME],
+        help="Files to download (default: %(default)s). Use '*' for a full snapshot.",
     )
     parser.add_argument(
         "--repo-id",
@@ -67,9 +74,8 @@ def main() -> int:
         repo_type="model",
         revision=args.revision,
         local_dir=str(output_dir),
-        local_dir_use_symlinks=False,
+        allow_patterns=args.allow_patterns,
         token=args.token,
-        resume_download=True,
     )
 
     print(f"Download complete: {local_path}")
