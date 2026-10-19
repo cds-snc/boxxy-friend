@@ -1,8 +1,101 @@
 import queue
 import unittest
+import threading
+from dataclasses import asdict, replace
 from unittest.mock import MagicMock, patch
 
 from modules.gui import BoxxyGui, HAIKU_PROMPT
+from modules.objective import Objective
+
+
+class ObjectiveWorkflowTests(unittest.TestCase):
+    def make_gui(self):
+        gui = BoxxyGui.__new__(BoxxyGui)
+        gui.run_thread = None
+        gui.refining = False
+        gui.approved_objective = None
+        gui.proposal = None
+        gui.llm = MagicMock()
+        gui.main_open = True
+        gui.stop_event = threading.Event()
+        gui.discussion = []
+        gui.events = queue.Queue()
+        gui.objective_vars = {}
+        objective = Objective()
+        for key, value in asdict(objective).items():
+            var = MagicMock()
+            var.get.return_value = str(value)
+            if key == "url":
+                gui.url_var = var
+            else:
+                gui.objective_vars[key] = var
+        for name in (
+            "start_button", "stop_button", "objective_preview", "apply_button", "objective_status",
+            "discussion_text", "request_var", "workspace", "execution_tab", "status_var",
+            "url_entry", "request_entry", "refine_button", "approve_button",
+        ):
+            setattr(gui, name, MagicMock())
+        gui.objective_entries = [MagicMock()]
+        gui._show_error = MagicMock()
+        gui._hide_error = MagicMock()
+        gui._set_text = MagicMock()
+        return gui
+
+    def test_start_requires_approval_and_freezes_approved_contract(self):
+        gui = self.make_gui()
+        with patch("modules.gui.threading.Thread") as thread:
+            gui.start_run()
+            thread.assert_not_called()
+            gui.approve_objective()
+            gui.start_run()
+        objective = thread.call_args.kwargs["args"][0]
+        self.assertEqual(objective, Objective())
+        thread.return_value.start.assert_called_once()
+        gui.start_button.configure.assert_called_with(state="disabled")
+
+    def test_edit_invalidates_approval_and_proposal(self):
+        gui = self.make_gui()
+        gui.approved_objective = Objective()
+        gui.proposal = replace(Objective(), element_count=2)
+        gui._objective_changed()
+        self.assertIsNone(gui.approved_objective)
+        self.assertIsNone(gui.proposal)
+        gui.start_button.configure.assert_called_with(state="disabled")
+
+    def test_reply_displays_diff_without_applying_or_approving(self):
+        gui = self.make_gui()
+        proposal = replace(Objective(), element_count=2)
+        gui._handle_event("objective_reply", ("Use two", "Proposed two", proposal))
+        self.assertIs(gui.proposal, proposal)
+        self.assertIsNone(gui.approved_objective)
+        gui.objective_vars["element_count"].set.assert_not_called()
+        self.assertIn("element_count: 3 -> 2", gui._set_text.call_args.args[1])
+        gui.apply_proposal()
+        gui.objective_vars["element_count"].set.assert_called_once_with("2")
+        self.assertIsNone(gui.approved_objective)
+
+    def test_invalid_numbers_and_refinement_failures_are_explicit(self):
+        gui = self.make_gui()
+        gui.objective_vars["element_count"].get.return_value = "not a number"
+        gui.approve_objective()
+        gui._show_error.assert_called_once()
+        with patch("modules.gui.refine_objective", side_effect=ValueError("Bad proposal")):
+            gui._refine_worker(Objective(), [], "Change it")
+        kind, payload = gui.events.get_nowait()
+        self.assertEqual(kind, "error")
+        self.assertIn("Bad proposal", payload[1])
+        self.assertEqual(gui.events.get_nowait()[0], "refinement_finished")
+
+    def test_cannot_start_while_model_is_refining(self):
+        gui = self.make_gui()
+        gui.refining = True
+        gui.approved_objective = Objective()
+        with patch("modules.gui.threading.Thread") as thread:
+            gui.start_run()
+        thread.assert_not_called()
+        gui._refresh_buttons()
+        gui.url_entry.configure.assert_called_with(state="disabled")
+        gui.objective_entries[0].configure.assert_called_with(state="disabled")
 
 
 class ModelReadinessTests(unittest.TestCase):

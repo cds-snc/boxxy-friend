@@ -1,2 +1,4 @@
 /models
 modules/__pycache__
+/runs/
+/tests/__pycache__/

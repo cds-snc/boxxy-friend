@@ -67,7 +67,8 @@ class BrowserElementCleanupTests(unittest.TestCase):
                 browser.page.get_by_role.assert_called_once_with(
                     "button", name="Design a form Start with a blank form."
                 )
-                browser.page.get_by_role.return_value.click.assert_called_once_with()
+                browser.page.get_by_role.return_value.nth.assert_called_once_with(0)
+                browser.page.get_by_role.return_value.nth.return_value.click.assert_called_once_with()
                 browser.page.get_by_text.assert_not_called()
 
     def test_typing_cleans_target_but_preserves_typed_text(self):

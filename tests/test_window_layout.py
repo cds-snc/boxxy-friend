@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 
 from modules.gui import BoxxyGui
 from modules.mode1 import Mode1
+from modules.objective import Objective
 from modules.window_layout import WindowBounds, desktop_bounds
 
 
@@ -82,8 +83,10 @@ class WindowLayoutTests(unittest.TestCase):
         gui.stop_event = MagicMock()
         gui.post = MagicMock()
         gui.root = MagicMock()
-        gui._run_worker("https://example.test")
+        objective = Objective()
+        gui._run_worker(objective)
         self.assertEqual(mode.call_args.kwargs["browser_bounds"], gui.browser_bounds)
+        self.assertEqual(mode.call_args.kwargs["objective"], objective)
         gui.root.assert_not_called()
         self.assertEqual(gui.root.mock_calls, [])
         mode.return_value.launch.assert_called_once_with()

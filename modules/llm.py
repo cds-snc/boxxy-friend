@@ -123,15 +123,22 @@ class LLM:
                     "additionalProperties": False,
                 },
             }
+            action_guidance = (
+                "Return at most ONE propose_objective call for supported edits, or no tools for discussion. "
+                "Do not execute browser actions. Keep advice brief. "
+                if "propose_objective" in names else
+                "Return at most ONE browser action and at most ONE update_progress call if that tool is "
+                "available. Choose only the next action using the current ARIA snapshot, then stop: "
+                "you will receive a fresh snapshot after it executes. Do not repeat actions or list future "
+                "actions. Keep each intent to one short sentence. "
+            )
             messages.append({
                 "role": "user",
                 "content": (
                     "Return only a JSON object with thoughts (string), text (string), and tool_calls (array). "
                     "Each tool call must be {\"function\": {\"name\": \"tool_name\", \"arguments\": {...}}}. "
-                    "Return at most ONE browser action and at most ONE update_progress call if that tool is "
-                    "available. Choose only the next action using the current ARIA snapshot, then stop: "
-                    "you will receive a fresh snapshot after it executes. Do not repeat actions or list future "
-                    "actions. Keep thoughts to one short sentence and each intent to one short sentence. "
+                    + action_guidance
+                    + "Keep thoughts to one short sentence. "
                     "Keep text brief or empty. "
                     "Use an empty array when no action is needed. Available tools:\n" + json.dumps(tools_schema)
                 ),

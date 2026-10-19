@@ -11,6 +11,7 @@ import sys
 import threading
 import time
 import traceback
+from dataclasses import asdict
 import tkinter as tk
 from datetime import datetime
 from pathlib import Path
@@ -20,8 +21,9 @@ from tkinter.scrolledtext import ScrolledText
 from modules import logger
 from modules.models import DEFAULT_MODELS_DIR, discover_models, validate_model
 from modules.window_layout import desktop_bounds
+from modules.objective import Objective, refine_objective
 
-DEFAULT_TEST_URL = "https://forms-staging.cdssandbox.xyz/en/form-builder"
+DEFAULT_TEST_URL = Objective().url
 
 HAIKU_PROMPT = [
     {"role": "system", "content": "You are a poet. Reply with only the poem, no title or commentary."},
@@ -76,6 +78,10 @@ class BoxxyGui:
         self.run_thread = None
         self.stop_event = threading.Event()
         self.closed = False
+        self.approved_objective = None
+        self.refining = False
+        self.discussion = []
+        self.proposal = None
 
         self.root = tk.Tk()
         self.root.title("Boxxy - Select a model")
@@ -249,10 +255,11 @@ class BoxxyGui:
         toolbar = ttk.Frame(self.root, padding=(8, 6))
         toolbar.pack(side="top", fill="x")
 
-        ttk.Label(toolbar, text="Mode 1 URL:").pack(side="left")
+        ttk.Label(toolbar, text="Scope URL:").pack(side="left")
         self.url_var = tk.StringVar(value=test_url)
         self.url_entry = ttk.Entry(toolbar, textvariable=self.url_var)
         self.url_entry.pack(side="left", fill="x", expand=True, padx=(4, 8))
+        self.url_var.trace_add("write", self._objective_changed)
 
         self.start_button = ttk.Button(toolbar, text="Start", command=self.start_run, state="disabled")
         self.start_button.pack(side="left")
@@ -276,7 +283,14 @@ class BoxxyGui:
         ttk.Label(bar, textvariable=self.status_var, anchor="w").pack(side="top", fill="x")
 
     def _build_main_panes(self):
-        panes = ttk.PanedWindow(self.root, orient="horizontal")
+        self.workspace = ttk.Notebook(self.root)
+        self.workspace.pack(fill="both", expand=True)
+        self.definition_tab = ttk.Frame(self.workspace, padding=8)
+        self.execution_tab = ttk.Frame(self.workspace)
+        self.workspace.add(self.definition_tab, text="Define smoke test")
+        self.workspace.add(self.execution_tab, text="Live run")
+        self._build_objective_editor()
+        panes = ttk.PanedWindow(self.execution_tab, orient="horizontal")
         panes.pack(side="top", fill="both", expand=True, padx=8, pady=(0, 8))
 
         # Left: live ARIA tree.
@@ -348,6 +362,137 @@ class BoxxyGui:
         self._show_output_view()
         right.add(output_frame, weight=2)
         self.root.after_idle(lambda: panes.sashpos(0, panes.winfo_width() // 2))
+
+    def _build_objective_editor(self):
+        self.approved_objective = None
+        self.refining = False
+        self.discussion = []
+        self.proposal = None
+        self.objective_vars = {}
+        self.objective_entries = []
+        fields = ttk.Frame(self.definition_tab)
+        fields.pack(fill="x")
+        defaults = asdict(Objective())
+        for row, (key, label) in enumerate((
+            ("title", "Form title"), ("element_count", "Input elements (1-10)"),
+            ("max_actions", "Maximum browser actions"), ("max_seconds", "Maximum seconds"),
+            ("no_progress_turns", "Consecutive no-progress turns"),
+        )):
+            ttk.Label(fields, text=label).grid(row=row, column=0, sticky="w", padx=(0, 8))
+            variable = tk.StringVar(value=str(defaults[key]))
+            entry = ttk.Entry(fields, textvariable=variable)
+            entry.grid(row=row, column=1, sticky="ew", pady=2)
+            variable.trace_add("write", self._objective_changed)
+            self.objective_vars[key] = variable
+            self.objective_entries.append(entry)
+        fields.columnconfigure(1, weight=1)
+        self.objective_status = tk.StringVar(value="Review and approve the objective before starting.")
+        ttk.Label(self.definition_tab, textvariable=self.objective_status, wraplength=640).pack(
+            fill="x", pady=4
+        )
+        self.objective_preview = self._readonly_text(self.definition_tab, height=10)
+        self.objective_preview.pack(fill="both", expand=True)
+        self.discussion_text = self._readonly_text(self.definition_tab, height=5)
+        self.discussion_text.pack(fill="both", expand=True, pady=4)
+        self._set_text(self.discussion_text, "Discuss a change, then review and apply the proposal. "
+                       "Types cycle: short answer, long answer, radio buttons. First input is required.")
+        controls = ttk.Frame(self.definition_tab)
+        controls.pack(fill="x")
+        self.request_var = tk.StringVar()
+        self.request_entry = ttk.Entry(controls, textvariable=self.request_var)
+        self.request_entry.pack(side="left", fill="x", expand=True)
+        self.refine_button = ttk.Button(controls, text="Discuss", command=self.discuss_objective)
+        self.refine_button.pack(side="left", padx=4)
+        self.apply_button = ttk.Button(
+            controls, text="Apply proposal", command=self.apply_proposal, state="disabled"
+        )
+        self.apply_button.pack(side="left")
+        self.approve_button = ttk.Button(
+            controls, text="Approve objective", command=self.approve_objective
+        )
+        self.approve_button.pack(side="left", padx=4)
+        self._objective_changed()
+
+    def _read_objective(self):
+        numbers = {}
+        for key in ("element_count", "max_actions", "max_seconds", "no_progress_turns"):
+            try:
+                numbers[key] = int(self.objective_vars[key].get().strip())
+            except ValueError as error:
+                raise ValueError(f"{key} must be a whole number.") from error
+        return Objective(
+            url=self.url_var.get().strip(), title=self.objective_vars["title"].get().strip(),
+            **numbers,
+        )
+
+    def _objective_changed(self, *_):
+        self.approved_objective = None
+        self.proposal = None
+        if not hasattr(self, "objective_preview"):
+            return
+        self.apply_button.configure(state="disabled")
+        try:
+            objective = self._read_objective()
+        except ValueError as error:
+            self.objective_status.set(str(error))
+            self._set_text(self.objective_preview, f"Invalid objective: {error}")
+        else:
+            self.objective_status.set("Draft changed. Review and approve before starting.")
+            self._set_text(self.objective_preview, objective.render())
+        self._refresh_buttons()
+
+    def approve_objective(self):
+        if self.run_thread is not None or self.refining:
+            return
+        try:
+            self.approved_objective = self._read_objective()
+        except ValueError as error:
+            self._show_error("Invalid objective", str(error))
+            return
+        self.proposal = None
+        self.apply_button.configure(state="disabled")
+        self._set_text(self.objective_preview, self.approved_objective.render())
+        self.objective_status.set("Objective approved. Start will run this exact contract.")
+        self._refresh_buttons()
+
+    def discuss_objective(self):
+        if self.run_thread is not None or self.refining:
+            return
+        try:
+            objective = self._read_objective()
+            request = self.request_var.get().strip()
+            if not request or len(request) > 2000:
+                raise ValueError("Enter a question or requested change of 1-2000 characters.")
+        except ValueError as error:
+            self._show_error("Cannot refine objective", str(error))
+            return
+        self.refining = True
+        self.approved_objective = None
+        self.proposal = None
+        self.objective_status.set("Discussing with the model; the browser has not started.")
+        self._refresh_buttons()
+        threading.Thread(
+            target=self._refine_worker, args=(objective, list(self.discussion), request),
+            name="boxxy-objective", daemon=True,
+        ).start()
+
+    def _refine_worker(self, objective, discussion, request):
+        try:
+            text, proposal = refine_objective(self.llm, objective, discussion, request)
+            self.post("objective_reply", request, text, proposal)
+        except Exception:
+            self.post("error", "Objective discussion failed", traceback.format_exc())
+        finally:
+            self.post("refinement_finished")
+
+    def apply_proposal(self):
+        if self.proposal is None or self.refining or self.run_thread is not None:
+            return
+        values = asdict(self.proposal)
+        self.url_var.set(values.pop("url"))
+        for key, value in values.items():
+            self.objective_vars[key].set(str(value))
+        self._objective_changed()
 
     @staticmethod
     def _readonly_text(parent, height):
@@ -446,6 +591,30 @@ class BoxxyGui:
             self._update_prompt(payload[0])
         elif kind == "error":
             self._show_error(*payload)
+        elif kind == "objective_reply":
+            request, text, self.proposal = payload
+            self.discussion.extend([
+                {"role": "user", "content": request},
+                {"role": "model", "content": text},
+            ])
+            self.discussion = self.discussion[-6:]
+            self._set_text(self.discussion_text, "\n\n".join(
+                f"{message['role']}: {message['content']}" for message in self.discussion
+            ))
+            if self.proposal is not None:
+                current = asdict(self._read_objective())
+                changes = "\n".join(
+                    f"{key}: {current[key]!r} -> {value!r}"
+                    for key, value in asdict(self.proposal).items() if current[key] != value
+                )
+                self._set_text(self.objective_preview,
+                               "PROPOSED CHANGES (not applied)\n" + (changes or "No changes.")
+                               + "\n\n" + self.proposal.render())
+            self.request_var.set("")
+        elif kind == "refinement_finished":
+            self.refining = False
+            self.objective_status.set("Discussion finished. Apply a proposal or edit, then approve.")
+            self._refresh_buttons()
         elif kind == "model_loaded":
             self.loading_phase = "haiku"
             self.loading_phase_start = time.perf_counter()
@@ -551,9 +720,20 @@ class BoxxyGui:
 
     def _refresh_buttons(self):
         running = self.run_thread is not None
-        self.start_button.configure(state="normal" if self.llm is not None and not running else "disabled")
+        editing = not running and not getattr(self, "refining", False)
+        approved = getattr(self, "approved_objective", None) is not None
+        self.start_button.configure(
+            state="normal" if self.llm is not None and editing and approved else "disabled"
+        )
         self.stop_button.configure(state="normal" if running else "disabled")
-        self.url_entry.configure(state="disabled" if running else "normal")
+        if hasattr(self, "objective_entries"):
+            for entry in [self.url_entry, self.request_entry, *self.objective_entries]:
+                entry.configure(state="normal" if editing else "disabled")
+            for button in (self.refine_button, self.approve_button):
+                button.configure(state="normal" if editing else "disabled")
+            self.apply_button.configure(
+                state="normal" if editing and self.proposal is not None else "disabled"
+            )
 
     # ------------------------------------------------------------ workers
 
@@ -616,20 +796,26 @@ class BoxxyGui:
             self.post("model_failed")
 
     def start_run(self):
-        if not self.main_open or self.llm is None or self.run_thread is not None:
+        if (not self.main_open or self.llm is None or self.run_thread is not None
+                or self.refining):
             return
-        url = self.url_var.get().strip()
-        if not url:
-            self._show_error("Invalid URL", "Please enter a URL for Boxxy to explore.")
+        if self.approved_objective is None:
+            self._show_error("Objective not approved", "Review and approve the objective before starting.")
+            return
+        objective = self.approved_objective
+        if objective != self._read_objective():
+            self._objective_changed()
+            self._show_error("Objective changed", "Approve the edited objective before starting.")
             return
 
         self._hide_error()
         self.stop_event.clear()
         self.run_thread = threading.Thread(
-            target=self._run_worker, args=(url,), name="boxxy-mode1", daemon=True
+            target=self._run_worker, args=(objective,), name="boxxy-mode1", daemon=True
         )
         self._refresh_buttons()
-        self.status_var.set(f"Boxxy is exploring {url} …")
+        self.workspace.select(self.execution_tab)
+        self.status_var.set(f"Boxxy is testing {objective.url} …")
         self.run_thread.start()
 
     def stop_run(self):
@@ -639,14 +825,15 @@ class BoxxyGui:
         self.stop_button.configure(state="disabled")
         self.status_var.set("Stopping after the current step…")
 
-    def _run_worker(self, url):
+    def _run_worker(self, objective):
         from modules.mode1 import Mode1, StopRequested
 
         boxxy = None
         try:
-            logger.log(f"Starting Mode 1 on {url}")
+            logger.log(f"Starting bounded smoke test on {objective.url}")
             boxxy = Mode1(
-                url,
+                objective.url,
+                objective=objective,
                 llm=self.llm,
                 on_snapshot=lambda snapshot: self.post("snapshot", snapshot),
                 on_progress=lambda progress: self.post("progress", progress),
@@ -657,16 +844,18 @@ class BoxxyGui:
             )
             boxxy.launch()
             boxxy.explore()
-            self.post("status", "Boxxy finished exploring.")
+            self.post("status", f"{boxxy.outcome}: {boxxy.outcome_detail} Results: {boxxy.output_dir}")
         except StopRequested:
             logger.log("Boxxy stopped by user.")
             self.post("status", "Boxxy stopped.")
-        except RecursionError:
-            self.post("error", "Boxxy explored too many steps", traceback.format_exc())
-            self.post("status", "Boxxy stopped due to an error.")
         except Exception:
             self.post("error", "Boxxy run failed", traceback.format_exc())
             self.post("status", "Boxxy stopped due to an error.")
+            if boxxy is not None and boxxy.outcome is None:
+                try:
+                    boxxy.finish("blocked", "Run failed; see the error details.")
+                except OSError:
+                    self.post("error", "Failed to save run result", traceback.format_exc())
         finally:
             if boxxy is not None:
                 try:

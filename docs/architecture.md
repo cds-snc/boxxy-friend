@@ -24,10 +24,51 @@ loading or generating again. Failures (including empty haikus) display their
 details and offer **Retry** (repeats both steps) or **Choose another model**.
 **Cancel** closes the app without entering the main UI.
 
-**Start** runs Mode 1 against the entered URL. `modules/mode1.py` coordinates
+The main UI first opens **Define smoke test**. `modules/objective.py` holds an
+immutable, validated GC Forms preset and renders the visible Scope / Probe /
+Halt contract. Editable fields are URL, title, input count and action/time/
+no-progress limits. Types cycle through short answer, long answer and radio
+buttons with fixed synthetic labels; only the first input is required.
+Unsupported workflow edits are explicitly outside this first preset.
+
+**Discuss** uses the already-loaded model without browser tools. Refinement
+receives the current structured draft and at most six recent conversation
+messages, and can return one schema-constrained `propose_objective` call.
+Code validates the proposal; the UI displays a diff, requires **Apply
+proposal**, then **Approve objective** before **Start**. Editing invalidates
+approval. Refinement and execution cannot use the model concurrently.
+The execution prompt contains the approved contract, not the discussion.
+
+**Start** runs Mode 1 against the approved URL. `modules/mode1.py` coordinates
 the model and the Playwright browser in `modules/browser.py`, using ARIA
 snapshots to choose actions. The GUI shows the live ARIA tree and action log;
 errors appear in a red bar.
+
+The bounded GUI runner keeps verified checkpoints separate from model-written
+progress notes. Dedicated tools check required-empty rejection in Test mode,
+fill all approved inputs with synthetic values and check valid-input
+validation, then capture a download event and save/validate GC Forms schema-v1
+JSON. Export validation checks title, layout, count, types, labels, required
+rules and radio options. A click or model assertion cannot complete the run.
+Static confirmation content in signed-out preview is not success evidence;
+missing validation is a blocking result, not a passed check.
+
+The browser starts with a fresh context and guards document navigations
+before requests leave the approved origin and form-builder paths. Auth,
+publishing, settings and response paths are outside scope. Browser operations
+check cancellation and consume the action budget before attempting actions.
+Time limits are cooperative: they are checked between operations, including
+after generation, rather than forcibly interrupting inference or Playwright.
+Repeated no-progress turns stop the run. Optional zero-based target indices
+allow the model to address repeated builder labels such as "Question".
+
+Every bounded run saves `runs/<run-id>/result.json` with the approved
+objective, outcome, evidence and recent progress. Validated exports are saved
+as `form.json` in that directory; failed exports remain there for diagnosis.
+Outcomes are `completed`, `blocked`, `budget_exhausted` and `stopped_by_user`.
+An interrupted process can leave a `running` result; this is not success.
+Programmatic callers passing a custom `goal` without an `objective` retain the
+legacy exploratory loop; the GUI always uses the bounded contract.
 
 Tkinter stays on the main thread. Model loading, generation, and browsing run
 in workers and communicate with the UI through a queue polled by the Tk main

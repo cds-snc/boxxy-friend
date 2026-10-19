@@ -7,6 +7,8 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from modules.llm import LLM
+from modules.objective import Objective, refine_objective
+from dataclasses import asdict
 
 
 TOOLS = [{
@@ -92,6 +94,19 @@ class GGUFLoadingTests(unittest.TestCase):
 
 
 class GGUFGenerationTests(unittest.TestCase):
+    def test_refinement_uses_proposal_instructions_not_browser_instructions(self):
+        self.llm.gguf_model.create_chat_completion.return_value = completion(json.dumps({
+            "thoughts": "", "text": "Use two inputs.", "tool_calls": [{
+                "function": {"name": "propose_objective",
+                             "arguments": asdict(Objective(element_count=2))}
+            }],
+        }))
+        _, proposal = refine_objective(self.llm, Objective(), [], "Use two inputs")
+        self.assertEqual(proposal.element_count, 2)
+        messages = self.llm.gguf_model.create_chat_completion.call_args.kwargs["messages"]
+        self.assertIn("ONE propose_objective", messages[-1]["content"])
+        self.assertNotIn("current ARIA snapshot", messages[-1]["content"])
+
     def setUp(self):
         self.llm = LLM()
         self.llm.gguf_model = MagicMock()

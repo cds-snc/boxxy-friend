@@ -2,7 +2,11 @@
 from playwright.async_api import async_playwright
 import asyncio
 import re
+import json
+from pathlib import Path
 from playwright.sync_api import sync_playwright
+from playwright.sync_api import expect
+from modules.objective import ProbeFailed
 from modules.window_layout import WindowBounds
 
 class Browser:
@@ -15,6 +19,33 @@ class Browser:
         self.window_bounds = window_bounds
         self.browser = None
         self.playwright = None
+        self.objective = None
+        self.before_action = None
+
+    def _guard_navigation(self, route):
+        request = route.request
+        if request.is_navigation_request() and not self.objective.allows(request.url):
+            self.scope_error = f"Blocked out-of-scope navigation: {request.url}"
+            route.abort()
+        else:
+            route.continue_()
+
+    def configure_scope(self, objective, before_action):
+        self.objective = objective
+        self.before_action = before_action
+        self.scope_error = None
+
+    def check_scope(self):
+        if self.objective is not None:
+            if self.scope_error:
+                raise ProbeFailed(self.scope_error)
+            if not self.objective.allows(self.page.url):
+                raise ProbeFailed(f"Page left approved scope: {self.page.url}")
+
+    def _action(self):
+        self.check_scope()
+        if self.before_action is not None:
+            self.before_action()
 
     def open(self):
         self.playwright = sync_playwright().start()
@@ -45,6 +76,8 @@ class Browser:
             finally:
                 session.detach()
         self.page.set_default_timeout(self.ACTION_TIMEOUT_MS)
+        if self.objective is not None:
+            self.page.context.route("**/*", self._guard_navigation)
         self.page.goto(self.base_url)
 
     def close(self):
@@ -112,13 +145,14 @@ class Browser:
             return match.group(2)
         return value.strip()
 
-    def use_combobox(self, element, value):
+    def use_combobox(self, element, value, index=None):
+        self._action()
         if self.browser is None:
             raise Exception("Browser is not open. Call open() first.")
 
         label = self._option_label(value)
         combobox, description = self._locate_by_role_or_text(element)
-        combobox = combobox.first
+        combobox = combobox.first if index is None else combobox.nth(index)
 
         if combobox.evaluate("e => e.tagName.toLowerCase()") == "select":
             selected = self._select_native_option(combobox, label)
@@ -173,7 +207,8 @@ class Browser:
         options.first.click()
         return label
 
-    def type(self, element, text):
+    def type(self, element, text, index=None):
+        self._action()
         if self.browser is None:
             raise Exception("Browser is not open. Call open() first.")
 
@@ -186,6 +221,8 @@ class Browser:
         else:
             result = f'I typed into element with text: "{element}" : "{text}"'
             locator = self.page.get_by_text(element)
+        if index is not None:
+            locator = locator.nth(index)
         locator.fill(text)
 
         self.page.wait_for_timeout(1000) # let the typing event actually do something.
@@ -199,7 +236,8 @@ class Browser:
             return result + "; the field now contains exactly that text"
         return result + f'; the field now contains "{value}" (differs from what was typed)'
     
-    def click(self, element):
+    def click(self, element, index=None):
+        self._action()
         if self.browser is None:
             raise Exception("Browser is not open. Call open() first.")
 
@@ -217,13 +255,75 @@ class Browser:
         if match:
             role, name = match.group(1), match.group(2)
             result = f'I clicked on role "{role}" with name "{name}"'
-            self.page.get_by_role(role, name=name).nth(0).click()
+            self.page.get_by_role(role, name=name).nth(0 if index is None else index).click()
         else:
             result = f'I clicked on element with text: "{element}"'
-            self.page.get_by_text(element).nth(0).click()
+            self.page.get_by_text(element).nth(0 if index is None else index).click()
 
         self.page.wait_for_timeout(1000) # let the click event actually do something.
         return result
+
+    def check_test_inputs(self, objective, valid):
+        self.check_scope()
+        if not self.page.url.split("?")[0].endswith("/preview"):
+            raise ProbeFailed("Required checks must run in GC Forms Test (/preview) mode.")
+        first = self.page.get_by_role("textbox", name=re.compile(r"^Boxxy question 1(?:\s|$)"))
+        expect(first).to_be_visible()
+        if valid:
+            for field in objective.fields:
+                self._action()
+                label = re.compile("^" + re.escape(field["label"]) + r"(?:\s|$)")
+                if field["type"] == "radio":
+                    group = self.page.get_by_role("group", name=label)
+                    if group.count() == 0:
+                        group = self.page.get_by_role("radiogroup", name=label)
+                    radio = group.get_by_role("radio", name="Option A", exact=True)
+                    radio.check()
+                    expect(radio).to_be_checked()
+                else:
+                    control = self.page.get_by_role("textbox", name=label)
+                    answer = f"Synthetic answer for {field['label']}"
+                    control.fill(answer)
+                    expect(control).to_have_value(answer)
+        else:
+            if first.input_value():
+                raise ProbeFailed("The required-empty check must run before entering answers.")
+        submit = self.page.get_by_role("button", name="Submit", exact=True)
+        self._action()
+        submit.click()
+        if valid:
+            expect(first).not_to_have_attribute("aria-invalid", "true")
+            if not first.evaluate("e => e.validity.valid"):
+                raise ProbeFailed("Valid synthetic input did not satisfy browser validation.")
+            if self.page.locator('[aria-invalid="true"]').count():
+                raise ProbeFailed("Test mode still contains invalid fields after valid input.")
+            return "All approved inputs exercised with synthetic values; no field validation errors after Submit."
+        # A static confirmation-page preview is not submission evidence.
+        try:
+            expect(first).to_have_attribute("aria-invalid", "true")
+        except AssertionError as error:
+            raise ProbeFailed(
+                "Test mode did not expose required-empty rejection after Submit. Signed-out preview "
+                "may not support validation; its static confirmation preview is not success evidence."
+            ) from error
+        return "Empty required input rejected after Submit (aria-invalid=true)."
+
+    def download_form(self, element, objective, folder):
+        self._action()
+        target, _ = self._locate_by_role_or_text(element)
+        with self.page.expect_download(timeout=self.ACTION_TIMEOUT_MS) as pending:
+            target.click()
+        download = pending.value
+        if download.failure():
+            raise ProbeFailed(f"Download failed: {download.failure()}")
+        path = Path(folder) / "form.json"
+        download.save_as(path)
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (ValueError, UnicodeError) as error:
+            raise ProbeFailed(f"Downloaded file is not valid JSON: {error}") from error
+        objective.validate_export(data)
+        return str(path)
 
     def test_browser(self):
         async def run():
