@@ -29,6 +29,9 @@ HAIKU_PROMPT = [
 ]
 
 POLL_INTERVAL_MS = 100
+# Initial guesses only: neither backend exposes granular readiness progress.
+ESTIMATED_LOAD_SECONDS = 60
+ESTIMATED_HAIKU_SECONDS = 30
 
 
 def parse_aria_snapshot(snapshot):
@@ -68,6 +71,8 @@ class BoxxyGui:
         self.events = queue.Queue()
         self.llm = None
         self.model_loading = False
+        self.loading_screen = None
+        self.loading_ready = False
         self.run_thread = None
         self.stop_event = threading.Event()
         self.closed = False
@@ -83,6 +88,7 @@ class BoxxyGui:
         self.root.report_callback_exception = self._on_tk_exception
 
         self._build_model_selector()
+        self.root.after(0, self._poll_events)
 
     def _position_window(self):
         bounds = self.gui_bounds
@@ -149,7 +155,7 @@ class BoxxyGui:
         self.open_button.configure(state="normal" if names else "disabled")
 
     def _open_main(self):
-        if self.main_open:
+        if self.main_open or self.loading_screen is not None:
             return
         path = self.available_models.get(self.model_var.get())
         if path is None:
@@ -163,7 +169,70 @@ class BoxxyGui:
             return
         self.model_path = str(path)
         self.selector.destroy()
-        self.root.title(f"Boxxy - {path.name}")
+        self._build_loading_screen()
+        self._install_exception_hooks()
+        self.root.after(50, self.load_model_async)
+
+    def _build_loading_screen(self):
+        self.root.title(f"Boxxy - Preparing {Path(self.model_path).name}")
+        self.loading_screen = ttk.Frame(self.root, padding=20)
+        self.loading_screen.pack(fill="both", expand=True)
+        ttk.Label(
+            self.loading_screen, text="Preparing your model", font=("TkDefaultFont", 16, "bold")
+        ).pack(anchor="w")
+        ttk.Label(
+            self.loading_screen, text=Path(self.model_path).name, wraplength=640
+        ).pack(anchor="w", pady=(8, 16))
+        self.loading_status_var = tk.StringVar(value="Getting ready to load...")
+        ttk.Label(
+            self.loading_screen, textvariable=self.loading_status_var, wraplength=640
+        ).pack(anchor="w")
+        self.loading_progress = ttk.Progressbar(self.loading_screen, maximum=100)
+        self.loading_progress.pack(fill="x", pady=12)
+        self.loading_time_var = tk.StringVar()
+        ttk.Label(
+            self.loading_screen, textvariable=self.loading_time_var, wraplength=640
+        ).pack(anchor="w")
+        ttk.Label(
+            self.loading_screen,
+            text="Progress and time remaining are approximate, not backend measurements. "
+                 "Initial estimates: 60s to load, 30s for the haiku; hardware and model size vary.",
+            wraplength=640, foreground="#555",
+        ).pack(anchor="w", pady=(4, 12))
+        results = ttk.Labelframe(self.loading_screen, text="Readiness haiku and benchmark", padding=8)
+        results.pack(fill="both", expand=True)
+        self.loading_results = self._readonly_text(results, height=10)
+        self.loading_results.pack(fill="both", expand=True)
+        controls = ttk.Frame(self.loading_screen)
+        controls.pack(fill="x", pady=(12, 0))
+        self.retry_loading_button = ttk.Button(
+            controls, text="Retry", command=self.load_model_async, state="disabled"
+        )
+        self.retry_loading_button.pack(side="left")
+        self.choose_model_button = ttk.Button(
+            controls, text="Choose another model", command=self._return_to_selector, state="disabled"
+        )
+        self.choose_model_button.pack(side="left", padx=8)
+        ttk.Button(controls, text="Cancel", command=self.on_close).pack(side="right")
+        self.loading_ok_button = ttk.Button(
+            controls, text="Okay", command=self._enter_main, state="disabled"
+        )
+        self.loading_ok_button.pack(side="right", padx=8)
+
+    def _return_to_selector(self):
+        if self.model_loading or self.loading_ready:
+            return
+        self.loading_screen.destroy()
+        self.loading_screen = None
+        self.root.title("Boxxy - Select a model")
+        self._build_model_selector()
+
+    def _enter_main(self):
+        if self.main_open or not self.loading_ready or self.model_loading or self.closed:
+            return
+        self.loading_screen.destroy()
+        self.loading_screen = None
+        self.root.title(f"Boxxy - {Path(self.model_path).name}")
         self._position_window()
         self._build_toolbar(self.test_url)
         self._build_error_bar()
@@ -172,9 +241,7 @@ class BoxxyGui:
 
         self.main_open = True
         logger.add_listener(self._on_log)
-        self._install_exception_hooks()
-        self.root.after(0, self._poll_events)
-        self.root.after(50, self.load_model_async)
+        self._refresh_buttons()
 
     # ------------------------------------------------------------------ layout
 
@@ -191,8 +258,6 @@ class BoxxyGui:
         self.start_button.pack(side="left")
         self.stop_button = ttk.Button(toolbar, text="Stop", command=self.stop_run, state="disabled")
         self.stop_button.pack(side="left", padx=(4, 0))
-        self.reload_button = ttk.Button(toolbar, text="Retry Model Load", command=self.load_model_async)
-        # Only shown if model loading fails.
 
     def _build_error_bar(self):
         self.error_bar = tk.Frame(self.root, bg="#fde2e1", padx=8, pady=4)
@@ -207,17 +272,8 @@ class BoxxyGui:
         bar = ttk.Frame(self.root, padding=(8, 4), relief="sunken")
         bar.pack(side="bottom", fill="x")
 
-        self.status_var = tk.StringVar(value="Starting…")
+        self.status_var = tk.StringVar(value="Boxxy is ready.")
         ttk.Label(bar, textvariable=self.status_var, anchor="w").pack(side="top", fill="x")
-
-        self.haiku_var = tk.StringVar(value="")
-        self.haiku_label = ttk.Label(
-            bar, textvariable=self.haiku_var, anchor="w", justify="left", font=("TkDefaultFont", 12, "italic")
-        )
-        self.haiku_label.pack(side="top", fill="x")
-
-        self.timing_var = tk.StringVar(value="")
-        ttk.Label(bar, textvariable=self.timing_var, anchor="w", foreground="#555").pack(side="top", fill="x")
 
     def _build_main_panes(self):
         panes = ttk.PanedWindow(self.root, orient="horizontal")
@@ -326,6 +382,9 @@ class BoxxyGui:
         self._show_error("GUI error", text)
 
     def _show_error(self, title, details):
+        if self.loading_screen is not None:
+            self._set_text(self.loading_results, f"{title}\n\n{details}")
+            return
         if not self.main_open:
             messagebox.showerror(title, details, parent=self.root)
             return
@@ -353,6 +412,8 @@ class BoxxyGui:
         self.post("log", message, clear_screen)
 
     def _poll_events(self):
+        if self.closed:
+            return
         try:
             while True:
                 try:
@@ -365,6 +426,8 @@ class BoxxyGui:
                     self._show_error(f"Failed to handle '{kind}' event", traceback.format_exc())
         finally:
             if not self.closed:
+                if self.model_loading:
+                    self._update_loading_progress()
                 self.root.after(POLL_INTERVAL_MS, self._poll_events)
 
     def _handle_event(self, kind, payload):
@@ -384,24 +447,36 @@ class BoxxyGui:
         elif kind == "error":
             self._show_error(*payload)
         elif kind == "model_loaded":
-            llm, load_seconds = payload
-            self.llm = llm
-            self.model_loading = False
-            self.reload_button.pack_forget()
-            self.timing_var.set(f"Model loaded in {load_seconds:.2f}s. Generating readiness haiku…")
-            self._refresh_buttons()
+            self.loading_phase = "haiku"
+            self.loading_phase_start = time.perf_counter()
+            self.loading_status_var.set("Step 2 of 2: Generating the readiness haiku...")
+            self._set_text(
+                self.loading_results,
+                f"Model loaded in {payload[0]:.2f}s.\nGenerating the readiness haiku...",
+            )
         elif kind == "model_failed":
             self.model_loading = False
-            self.status_var.set("Model failed to load.")
-            self.reload_button.pack(side="left", padx=(4, 0))
-            self._refresh_buttons()
-        elif kind == "haiku":
-            haiku, load_seconds, gen_seconds = payload
-            self.haiku_var.set(haiku)
-            self.timing_var.set(
-                f"Model loaded in {load_seconds:.2f}s · Haiku generated in {gen_seconds:.2f}s (after load)"
+            self.loading_status_var.set("Model preparation failed. Retry or choose another model.")
+            self.loading_time_var.set(
+                f"Elapsed: {time.perf_counter() - self.loading_start:.1f}s"
             )
-            self.status_var.set("Boxxy is ready.")
+            self.retry_loading_button.configure(state="normal")
+            self.choose_model_button.configure(state="normal")
+        elif kind == "model_ready":
+            self.llm, haiku, load_seconds, gen_seconds = payload
+            self.model_loading = False
+            self.loading_ready = True
+            self.loading_progress.configure(value=100)
+            self.loading_status_var.set("Model ready. Review the results, then press Okay to continue.")
+            self.loading_time_var.set("Complete - 100%")
+            self._set_text(
+                self.loading_results,
+                f"{haiku}\n\nBenchmark (one readiness run)\n"
+                f"Model load: {load_seconds:.2f}s\n"
+                f"Haiku generation: {gen_seconds:.2f}s\n"
+                f"Total: {load_seconds + gen_seconds:.2f}s",
+            )
+            self.loading_ok_button.configure(state="normal")
         elif kind == "run_finished":
             self.run_thread = None
             self._refresh_buttons()
@@ -482,21 +557,42 @@ class BoxxyGui:
 
     # ------------------------------------------------------------ workers
 
+    def _update_loading_progress(self):
+        now = time.perf_counter()
+        elapsed = now - self.loading_start
+        phase_elapsed = now - self.loading_phase_start
+        generating = self.loading_phase == "haiku"
+        estimate = ESTIMATED_HAIKU_SECONDS if generating else ESTIMATED_LOAD_SECONDS
+        progress = (50 if generating else 0) + min(phase_elapsed / estimate, 0.9) * 50
+        self.loading_progress.configure(value=progress)
+        if phase_elapsed >= estimate:
+            remaining = "Taking longer than estimated"
+        else:
+            seconds = estimate - phase_elapsed + (0 if generating else ESTIMATED_HAIKU_SECONDS)
+            remaining = f"Estimated time remaining: ~{seconds:.0f}s"
+        self.loading_time_var.set(
+            f"Estimated progress: {progress:.0f}% | Elapsed: {elapsed:.1f}s | {remaining}"
+        )
+
     def load_model_async(self):
-        if self.model_loading or self.llm is not None:
+        if self.closed or self.model_loading or self.loading_ready or self.loading_screen is None:
             return
         self.model_loading = True
-        self.reload_button.pack_forget()
-        self.status_var.set(f"Loading model from {self.model_path}…")
-        self.haiku_var.set("")
-        self.timing_var.set("")
+        self.loading_start = self.loading_phase_start = time.perf_counter()
+        self.loading_phase = "load"
+        self.retry_loading_button.configure(state="disabled")
+        self.choose_model_button.configure(state="disabled")
+        self.loading_ok_button.configure(state="disabled")
+        self.loading_status_var.set("Step 1 of 2: Loading the model...")
+        self._set_text(self.loading_results, "")
+        self._update_loading_progress()
         threading.Thread(target=self._load_model_worker, name="boxxy-model-loader", daemon=True).start()
 
     def _load_model_worker(self):
         try:
+            load_start = time.perf_counter()
             from modules.llm import LLM
 
-            load_start = time.perf_counter()
             llm = LLM()
             llm.load_model(self.model_path)
             load_seconds = time.perf_counter() - load_start
@@ -505,21 +601,22 @@ class BoxxyGui:
             self.post("model_failed")
             return
 
-        self.post("model_loaded", llm, load_seconds)
-        self.post("status", "Model loaded. Asking Boxxy for a haiku…")
+        self.post("model_loaded", load_seconds)
 
         try:
             gen_start = time.perf_counter()
             response = llm.gen_text(HAIKU_PROMPT)
             gen_seconds = time.perf_counter() - gen_start
-            haiku = (response.get("text") or "").strip() or "(the model returned an empty haiku)"
-            self.post("haiku", haiku, load_seconds, gen_seconds)
+            haiku = (response.get("text") or "").strip()
+            if not haiku:
+                raise ValueError("The model returned an empty readiness haiku.")
+            self.post("model_ready", llm, haiku, load_seconds, gen_seconds)
         except Exception:
             self.post("error", "Haiku generation failed", traceback.format_exc())
-            self.post("status", "Model loaded, but the readiness haiku failed.")
+            self.post("model_failed")
 
     def start_run(self):
-        if self.llm is None or self.run_thread is not None:
+        if not self.main_open or self.llm is None or self.run_thread is not None:
             return
         url = self.url_var.get().strip()
         if not url:

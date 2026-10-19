@@ -27,8 +27,13 @@ source .venv/bin/activate
 python boxxy.py
 ```
 
-Select **Ornith-1.5-9B-Q4_K_M.gguf** and click **Open Boxxy**. Wait for the
-model to load and a haiku with its generation time to appear in the bottom bar.
+Select **Ornith-1.5-9B-Q4_K_M.gguf** and click **Open Boxxy**. A dedicated
+preparation screen shows approximate progress, estimated time remaining, and
+elapsed time while the model loads and generates a readiness haiku. Review the
+haiku and benchmark (model load, generation, and total time), then press
+**Okay** to enter the main UI. Estimates are rough and depend on your hardware
+and model; measured benchmark times are shown when complete. If preparation
+fails, use **Retry** or **Choose another model**; **Cancel** exits.
 Enter the URL of a site you are authorized to test and press **Start**.
 The left pane shows the page's ARIA tree; the right pane logs actions.
 Errors appear in a red bar. Use **Refresh** on the model-selection screen if

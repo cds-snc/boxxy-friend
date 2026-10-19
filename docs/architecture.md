@@ -9,8 +9,21 @@ directory. Each GGUF quantization is listed separately, including files one
 folder deep as `folder/filename.gguf`. **Refresh** rescans the directory;
 **Cancel** exits without loading a model.
 
-The selected model loads in a background worker. Once ready, it generates a haiku
-about black box testing and displays the generation time in the bottom bar.
+The selected model loads in a background worker on a dedicated preparation
+screen, then generates a haiku about black box testing. The screen shows
+elapsed time and clearly labeled approximate progress/ETA. Neither backend
+reports granular progress: estimates use initial budgets of 60 seconds to load
+and 30 seconds to generate. Progress stays below the phase boundary until the
+worker confirms completion, and an overrun is labeled rather than promising
+zero time remaining. These estimates do not control timeouts.
+
+Once both steps succeed, the screen displays the haiku and measured load,
+generation, and total times for that readiness run. **Okay** is enabled only
+then; pressing it builds the main UI with the already-loaded model, without
+loading or generating again. Failures (including empty haikus) display their
+details and offer **Retry** (repeats both steps) or **Choose another model**.
+**Cancel** closes the app without entering the main UI.
+
 **Start** runs Mode 1 against the entered URL. `modules/mode1.py` coordinates
 the model and the Playwright browser in `modules/browser.py`, using ARIA
 snapshots to choose actions. The GUI shows the live ARIA tree and action log;

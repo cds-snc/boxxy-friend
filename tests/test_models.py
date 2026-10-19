@@ -155,6 +155,7 @@ class ModelSelectorTests(unittest.TestCase):
     def test_startup_only_builds_selector_without_loading_model(self):
         with (
             patch("modules.gui.tk.Tk"),
+            patch.object(BoxxyGui, "_position_window"),
             patch.object(BoxxyGui, "_build_model_selector") as selector,
             patch.object(BoxxyGui, "_build_toolbar") as toolbar,
             patch.object(BoxxyGui, "load_model_async") as load,
@@ -168,7 +169,11 @@ class ModelSelectorTests(unittest.TestCase):
         self.assertIsNone(gui.llm)
 
     def make_gui(self):
-        with patch("modules.gui.tk.Tk"), patch.object(BoxxyGui, "_build_model_selector"):
+        with (
+            patch("modules.gui.tk.Tk"),
+            patch.object(BoxxyGui, "_position_window"),
+            patch.object(BoxxyGui, "_build_model_selector"),
+        ):
             gui = BoxxyGui()
         gui.selector = MagicMock()
         gui.model_var = MagicMock()
@@ -176,7 +181,7 @@ class ModelSelectorTests(unittest.TestCase):
         gui.available_models = {"selected": Path("/models/selected")}
         return gui
 
-    def test_selected_path_is_used_and_loading_is_scheduled_after_main_build(self):
+    def test_selected_path_opens_loading_screen_without_building_main_ui(self):
         gui = self.make_gui()
         with (
             patch("modules.gui.validate_model") as validate,
@@ -185,15 +190,18 @@ class ModelSelectorTests(unittest.TestCase):
             patch.object(gui, "_build_error_bar"),
             patch.object(gui, "_build_status_bar"),
             patch.object(gui, "_build_main_panes") as panes,
+            patch.object(gui, "_build_loading_screen") as loading,
             patch.object(gui, "_install_exception_hooks"),
         ):
+            loading.side_effect = lambda: setattr(gui, "loading_screen", MagicMock())
             gui._open_main()
             gui._open_main()
         validate.assert_called_once_with(Path("/models/selected"))
-        toolbar.assert_called_once_with(gui.test_url)
-        panes.assert_called_once()
+        loading.assert_called_once()
+        toolbar.assert_not_called()
+        panes.assert_not_called()
         gui.selector.destroy.assert_called_once()
-        self.assertTrue(gui.main_open)
+        self.assertFalse(gui.main_open)
         self.assertEqual(gui.model_path, "/models/selected")
         gui.root.after.assert_any_call(50, gui.load_model_async)
 
