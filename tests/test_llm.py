@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from modules.llm import LLM
@@ -54,6 +55,8 @@ class GGUFLoadingTests(unittest.TestCase):
             with self.subTest(path=path):
                 backend = MagicMock()
                 llm = LLM()
+                llm.mlx_model = MagicMock()
+                llm.mlx_tokenizer = MagicMock()
                 with (
                     patch.dict(sys.modules, {"llama_cpp": backend}),
                     patch("modules.llm.AutoProcessor") as processor,
@@ -64,6 +67,8 @@ class GGUFLoadingTests(unittest.TestCase):
                     model_path=str(self.path), n_ctx=32000, n_gpu_layers=-1, verbose=False
                 )
                 self.assertIs(llm.gguf_model, backend.Llama.return_value)
+                self.assertIsNone(llm.mlx_model)
+                self.assertIsNone(llm.mlx_tokenizer)
                 processor.from_pretrained.assert_not_called()
                 model.from_pretrained.assert_not_called()
 
@@ -82,6 +87,8 @@ class GGUFLoadingTests(unittest.TestCase):
     def test_transformers_loading_is_unchanged_and_clears_gguf_backend(self):
         llm = LLM()
         llm.gguf_model = MagicMock()
+        llm.mlx_model = MagicMock()
+        llm.mlx_tokenizer = MagicMock()
         with (
             patch("modules.llm.AutoProcessor") as processor,
             patch("modules.llm.AutoModelForMultimodalLM") as model,
@@ -91,6 +98,265 @@ class GGUFLoadingTests(unittest.TestCase):
         model.from_pretrained.assert_called_once_with(str(self.folder / "transformers"), dtype="auto")
         model.from_pretrained.return_value.to.assert_called_once_with("mps")
         self.assertIsNone(llm.gguf_model)
+        self.assertIsNone(llm.mlx_model)
+        self.assertIsNone(llm.mlx_tokenizer)
+
+
+class MLXLoadingTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.path = Path(self.temp.name) / "ornith"
+        self.path.mkdir()
+        for filename, data in (
+            ("config.json", {
+                "model_type": "qwen3_5", "quantization": {"bits": 6, "group_size": 64},
+            }),
+            ("tokenizer_config.json", {"tokenizer_class": "Qwen2Tokenizer"}),
+            ("tokenizer.json", {}),
+        ):
+            (self.path / filename).write_text(json.dumps(data), encoding="utf-8")
+        (self.path / "model.safetensors").write_bytes(b"weights")
+        self.backend = MagicMock()
+        self.backend.load.return_value = (MagicMock(), MagicMock())
+        for target, value in (("system", "Darwin"), ("machine", "arm64")):
+            patcher = patch(f"modules.llm.platform.{target}", return_value=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_loads_mlx_without_transformers_and_clears_other_backends(self):
+        llm = LLM()
+        llm.model = llm.processor = llm.gguf_model = MagicMock()
+        with (
+            patch.dict(sys.modules, {"mlx_lm": self.backend}),
+            patch("modules.llm.AutoProcessor") as processor,
+            patch("modules.llm.AutoModelForMultimodalLM") as model,
+        ):
+            llm.load_model(self.path)
+        self.backend.load.assert_called_once_with(str(self.path.resolve()))
+        self.assertIs(llm.mlx_model, self.backend.load.return_value[0])
+        self.assertIs(llm.mlx_tokenizer, self.backend.load.return_value[1])
+        self.assertIsNone(llm.model)
+        self.assertIsNone(llm.processor)
+        self.assertIsNone(llm.gguf_model)
+        processor.from_pretrained.assert_not_called()
+        model.from_pretrained.assert_not_called()
+
+    def test_missing_backend_has_actionable_error(self):
+        with patch.dict(sys.modules, {"mlx_lm": None}):
+            with self.assertRaisesRegex(RuntimeError, "pip install -r requirements.txt"):
+                LLM().load_model(self.path)
+
+    def test_unsupported_platform_has_explicit_error(self):
+        for system, machine in (("Darwin", "x86_64"), ("Linux", "aarch64")):
+            with (
+                self.subTest(system=system, machine=machine),
+                patch("modules.llm.platform.system", return_value=system),
+                patch("modules.llm.platform.machine", return_value=machine),
+                patch.dict(sys.modules, {"mlx_lm": self.backend}),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "Apple Silicon"):
+                    LLM().load_model(self.path)
+        self.backend.load.assert_not_called()
+
+    def test_load_errors_propagate_and_preserve_previous_backend(self):
+        self.backend.load.side_effect = ValueError("unsupported architecture")
+        llm = LLM()
+        previous = llm.gguf_model = MagicMock()
+        with patch.dict(sys.modules, {"mlx_lm": self.backend}):
+            with self.assertRaisesRegex(ValueError, "unsupported architecture"):
+                llm.load_model(self.path)
+        self.assertIs(llm.gguf_model, previous)
+        self.assertIsNone(llm.mlx_model)
+
+    def test_incomplete_snapshot_does_not_reach_backend(self):
+        (self.path / "tokenizer.json").unlink()
+        with patch.dict(sys.modules, {"mlx_lm": self.backend}):
+            with self.assertRaisesRegex(ValueError, "Missing tokenizer"):
+                LLM().load_model(self.path)
+        self.backend.load.assert_not_called()
+
+
+class MLXConstraintSetupTests(unittest.TestCase):
+    def test_reuses_tokenizer_preprocessing_with_fresh_processor_per_attempt(self):
+        llm = LLM()
+        llm.mlx_tokenizer = MagicMock()
+        constraints_module = MagicMock()
+        first, retry = object(), object()
+        constraints_module.MLXJSONSchema.return_value.processor.side_effect = [first, retry]
+        schema = {"type": "object"}
+        with patch.dict(sys.modules, {"modules.mlx_json": constraints_module}):
+            self.assertEqual(llm._mlx_logits_processors(schema), [first])
+            self.assertEqual(llm._mlx_logits_processors(schema), [retry])
+        constraints_module.MLXJSONSchema.assert_called_once_with(llm.mlx_tokenizer)
+        self.assertEqual(
+            constraints_module.MLXJSONSchema.return_value.processor.call_args_list,
+            [unittest.mock.call(schema), unittest.mock.call(schema)],
+        )
+
+
+class MLXGenerationTests(unittest.TestCase):
+    @staticmethod
+    def chunks(raw, finish_reason="stop", generation_tokens=80):
+        return [SimpleNamespace(
+            text=raw, finish_reason=finish_reason,
+            prompt_tokens=100, generation_tokens=generation_tokens,
+        )]
+
+    def setUp(self):
+        self.llm = LLM()
+        self.llm.mlx_model = MagicMock()
+        self.llm.mlx_tokenizer = MagicMock()
+        self.llm.mlx_tokenizer.apply_chat_template.return_value = "formatted prompt"
+        self.backend = MagicMock()
+        self.sampling = MagicMock()
+        patcher = patch.dict(sys.modules, {"mlx_lm": self.backend, "mlx_lm.sample_utils": self.sampling})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        patcher = patch("modules.llm.log")
+        self.log = patcher.start()
+        self.addCleanup(patcher.stop)
+        patcher = patch.object(self.llm, "_mlx_logits_processors", side_effect=lambda schema: [MagicMock()])
+        self.processors = patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_plain_generation_uses_template_and_preserves_response_contract(self):
+        messages = [{"role": "model", "content": "Earlier answer"}, *MESSAGES]
+        self.backend.generate.return_value = "A haiku"
+        self.assertEqual(self.llm.gen_text(messages), {
+            "raw": "A haiku", "thoughts": "", "text": "A haiku", "tool_calls": [],
+        })
+        self.llm.mlx_tokenizer.apply_chat_template.assert_called_once_with(
+            [{"role": "assistant", "content": "Earlier answer"}, *MESSAGES],
+            tokenize=False, add_generation_prompt=True, enable_thinking=False,
+        )
+        self.backend.generate.assert_called_once_with(
+            self.llm.mlx_model, self.llm.mlx_tokenizer,
+            prompt="formatted prompt", max_tokens=2048, verbose=False,
+        )
+        self.assertEqual(messages[0]["role"], "model")
+
+    def test_plain_generation_separates_thinking(self):
+        self.backend.generate.return_value = "<think>Reasoning</think>\nAnswer"
+        self.assertEqual(self.llm.gen_text(MESSAGES), {
+            "raw": "<think>Reasoning</think>\nAnswer",
+            "thoughts": "Reasoning", "text": "Answer", "tool_calls": [],
+        })
+
+    def test_tools_and_progress_use_existing_json_contract(self):
+        result = {
+            "thoughts": "Continue", "text": "", "tool_calls": [
+                {"function": {"name": "perform_click", "arguments": {"element": "Continue"}}},
+                {"function": {"name": "update_progress", "arguments": {"finding": "Found button"}}},
+            ],
+        }
+        raw = json.dumps(result)
+        self.backend.stream_generate.return_value = self.chunks(raw)
+        self.assertEqual(self.llm.gen_text(MESSAGES, [*TOOLS, PROGRESS_TOOL]), {**result, "raw": raw})
+        prompt_messages = self.llm.mlx_tokenizer.apply_chat_template.call_args.args[0]
+        self.assertIn("Available tools:", prompt_messages[-1]["content"])
+        self.assertIn("at most ONE browser action", prompt_messages[-1]["content"])
+        self.assertEqual(MESSAGES, [{"role": "user", "content": "Click Continue."}])
+        schema = self.processors.call_args.args[0]
+        self.assertEqual(schema["properties"]["tool_calls"]["maxItems"], 2)
+        self.assertEqual(
+            schema["properties"]["tool_calls"]["items"]["oneOf"][0]["properties"]["function"]
+            ["properties"]["arguments"], TOOLS[0]["function"]["parameters"],
+        )
+        self.assertEqual(len(self.backend.stream_generate.call_args.kwargs["logits_processors"]), 1)
+        self.assertEqual(self.backend.stream_generate.call_args.kwargs["max_tokens"], 8192)
+        self.sampling.make_sampler.assert_called_once_with(temp=0.2)
+        self.log.assert_not_called()
+
+    def test_objective_refinement_uses_proposal_instructions(self):
+        self.backend.stream_generate.return_value = self.chunks(json.dumps({
+            "thoughts": "", "text": "Use two inputs.", "tool_calls": [{
+                "function": {"name": "propose_objective", "arguments": asdict(Objective(element_count=2))}
+            }],
+        }))
+        _, proposal = refine_objective(self.llm, Objective(), [], "Use two inputs")
+        self.assertEqual(proposal.element_count, 2)
+        messages = self.llm.mlx_tokenizer.apply_chat_template.call_args.args[0]
+        self.assertIn("ONE propose_objective", messages[-1]["content"])
+        self.assertNotIn("current ARIA snapshot", messages[-1]["content"])
+
+    def test_invalid_output_retries_then_returns_valid_response(self):
+        valid = {"thoughts": "", "text": "Done", "tool_calls": []}
+        self.backend.stream_generate.side_effect = [self.chunks("{"), self.chunks(json.dumps(valid))]
+        self.assertEqual(self.llm.gen_text(MESSAGES, TOOLS), {**valid, "raw": json.dumps(valid)})
+        self.assertEqual(self.backend.stream_generate.call_count, 2)
+        self.log.assert_called_once()
+        self.assertIn("MLX response parsing failed", self.log.call_args.args[0])
+        messages = self.llm.mlx_tokenizer.apply_chat_template.call_args.args[0]
+        self.assertIn("much shorter", messages[-1]["content"])
+        self.assertEqual(self.processors.call_count, 2)
+        first, retry = self.backend.stream_generate.call_args_list
+        self.assertIsNot(first.kwargs["logits_processors"][0], retry.kwargs["logits_processors"][0])
+
+    def test_invalid_shapes_unknown_tools_and_excess_actions_fail_explicitly(self):
+        action = {"function": {"name": "perform_click", "arguments": {}}}
+        for result in (
+            [], {}, {"thoughts": "", "text": "", "tool_calls": [None]},
+            {"thoughts": "", "text": "", "tool_calls": [
+                {"function": {"name": "unknown_tool", "arguments": {}}},
+            ]},
+            {"thoughts": "", "text": "", "tool_calls": [
+                {"function": {"name": "perform_click", "arguments": "{}"}},
+            ]},
+            {"thoughts": "", "text": "", "tool_calls": [action, action]},
+        ):
+            with self.subTest(result=result):
+                self.backend.stream_generate.reset_mock(side_effect=True)
+                self.backend.stream_generate.return_value = self.chunks(json.dumps(result))
+                with self.assertRaises(ValueError):
+                    self.llm.gen_text(MESSAGES, TOOLS)
+                self.assertEqual(self.backend.stream_generate.call_count, 2)
+
+    def test_truncation_retries_with_real_token_diagnostics_and_never_returns_partial_tools(self):
+        valid = {"thoughts": "", "text": "", "tool_calls": []}
+        self.backend.stream_generate.side_effect = [
+            self.chunks('{"thoughts":"","text":"' + "\\n" * 2048, "length", 8192),
+            self.chunks(json.dumps(valid)),
+        ]
+        self.assertEqual(self.llm.gen_text(MESSAGES, TOOLS), {**valid, "raw": json.dumps(valid)})
+        self.log.assert_called_once()
+        diagnostic = self.log.call_args.args[0]
+        self.assertIn("finish_reason='length'", diagnostic)
+        self.assertIn("'completion_tokens': 8192", diagnostic)
+        self.assertIn("max_tokens=8192", diagnostic)
+        self.assertIn("incomplete tool calls will not be executed", diagnostic)
+        messages = self.llm.mlx_tokenizer.apply_chat_template.call_args.args[0]
+        self.assertIn("output token limit", messages[-1]["content"])
+
+    def test_repeated_truncation_raises_actionable_error_even_if_partial_json_is_parseable(self):
+        raw = json.dumps({"thoughts": "", "text": "", "tool_calls": []})
+        self.backend.stream_generate.return_value = self.chunks(raw, "length", 8192)
+        with self.assertRaisesRegex(ValueError, "8192-token output limit"):
+            self.llm.gen_text(MESSAGES, TOOLS)
+        self.assertEqual(self.backend.stream_generate.call_count, 2)
+
+    def test_empty_stream_and_generation_errors_are_explicit(self):
+        self.backend.stream_generate.return_value = []
+        with self.assertRaisesRegex(ValueError, "no output chunks"):
+            self.llm.gen_text(MESSAGES, TOOLS)
+        self.backend.stream_generate.side_effect = RuntimeError("out of memory")
+        with self.assertRaisesRegex(RuntimeError, "out of memory"):
+            self.llm.gen_text(MESSAGES, TOOLS)
+
+    def test_stream_chunks_are_joined_without_repeating_output(self):
+        raw = json.dumps({"thoughts": "", "text": "Done", "tool_calls": []})
+        first = self.chunks(raw[:20], None)[0]
+        last = self.chunks(raw[20:])[0]
+        self.backend.stream_generate.return_value = [first, last]
+        self.assertEqual(self.llm.gen_text(MESSAGES, TOOLS)["raw"], raw)
+
+    def test_missing_content_and_generation_errors_are_explicit(self):
+        self.backend.generate.return_value = None
+        with self.assertRaisesRegex(ValueError, "MLX model returned no text content"):
+            self.llm.gen_text(MESSAGES)
+        self.backend.generate.side_effect = RuntimeError("out of memory")
+        with self.assertRaisesRegex(RuntimeError, "out of memory"):
+            self.llm.gen_text(MESSAGES)
 
 
 class GGUFGenerationTests(unittest.TestCase):

@@ -1,4 +1,5 @@
 import json
+import platform
 import re
 from pathlib import Path
 
@@ -6,17 +7,21 @@ from transformers import AutoProcessor, AutoModelForMultimodalLM
 from transformers.utils.chat_parsing_utils import recursive_parse
 
 from modules.logger import log
-from modules.models import resolve_gguf, validate_gguf
+from modules.models import is_mlx_model, resolve_gguf, validate_gguf, validate_model
 
 
 class LLM:
     MAX_PARSE_ATTEMPTS = 2
     MAX_TOKENS=2048
+    MLX_TOOL_MAX_TOKENS = 8192
 
     def __init__(self):
         self.model = None
         self.processor = None
         self.gguf_model = None
+        self.mlx_model = None
+        self.mlx_tokenizer = None
+        self.mlx_constraints = None
 
     def load_model(self, local_path):
         gguf = resolve_gguf(Path(local_path))
@@ -34,6 +39,30 @@ class LLM:
             self.gguf_model = model
             self.model = None
             self.processor = None
+            self.mlx_model = None
+            self.mlx_tokenizer = None
+            self.mlx_constraints = None
+            return
+
+        if is_mlx_model(Path(local_path)):
+            validate_model(Path(local_path))
+            if platform.system() != "Darwin" or platform.machine() != "arm64":
+                raise RuntimeError("MLX models require macOS on Apple Silicon (arm64).")
+            try:
+                from mlx_lm import load
+            except ModuleNotFoundError as error:
+                if error.name not in ("mlx_lm", "mlx", "mlx.core"):
+                    raise
+                raise RuntimeError(
+                    "MLX models require mlx-lm. Install it with: pip install -r requirements.txt"
+                ) from error
+            model, tokenizer = load(str(Path(local_path).resolve()))
+            self.mlx_model = model
+            self.mlx_tokenizer = tokenizer
+            self.mlx_constraints = None
+            self.model = None
+            self.processor = None
+            self.gguf_model = None
             return
 
         # Load model
@@ -47,10 +76,13 @@ class LLM:
         self.model = model
         self.processor = processor
         self.gguf_model = None
+        self.mlx_model = None
+        self.mlx_tokenizer = None
+        self.mlx_constraints = None
 
     def gen_text(self, input_text, tools_schema=None):
-        if self.gguf_model is not None:
-            return self._gen_gguf_text(input_text, tools_schema)
+        if self.gguf_model is not None or self.mlx_model is not None:
+            return self._gen_local_text(input_text, tools_schema)
         messages = input_text
 
         for attempt in range(self.MAX_PARSE_ATTEMPTS):
@@ -78,7 +110,22 @@ class LLM:
 
         raise RuntimeError("LLM response generation exhausted without returning or raising")
 
-    def _gen_gguf_text(self, input_text, tools_schema):
+    def _mlx_logits_processors(self, schema):
+        if self.mlx_constraints is None:
+            try:
+                from modules.mlx_json import MLXJSONSchema
+                self.mlx_constraints = MLXJSONSchema(self.mlx_tokenizer)
+            except ModuleNotFoundError as error:
+                if error.name != "lmformatenforcer":
+                    raise
+                raise RuntimeError(
+                    "MLX tool generation requires lm-format-enforcer. "
+                    "Install it with: pip install -r requirements.txt"
+                ) from error
+        return [self.mlx_constraints.processor(schema)]
+
+    def _gen_local_text(self, input_text, tools_schema):
+        backend = "MLX" if self.mlx_model is not None else "GGUF"
         messages = [
             {**message, "role": "assistant" if message["role"] == "model" else message["role"]}
             for message in input_text
@@ -145,12 +192,54 @@ class LLM:
             })
 
         for attempt in range(self.MAX_PARSE_ATTEMPTS):
-            completion = self.gguf_model.create_chat_completion(
-                messages=messages, max_tokens=self.MAX_TOKENS, **options
-            )
-            raw = completion["choices"][0]["message"]["content"]
+            max_tokens = self.MAX_TOKENS
+            if self.mlx_model is not None:
+                prompt = self.mlx_tokenizer.apply_chat_template(
+                    messages, tokenize=False, add_generation_prompt=True, enable_thinking=False
+                )
+                generation_options = {}
+                if tools_schema:
+                    from mlx_lm import stream_generate
+                    from mlx_lm.sample_utils import make_sampler
+
+                    generation_options["sampler"] = make_sampler(temp=0.2)
+                    generation_options["logits_processors"] = self._mlx_logits_processors(
+                        options["response_format"]["schema"]
+                    )
+                    max_tokens = self.MLX_TOOL_MAX_TOKENS
+                    pieces = []
+                    last_chunk = None
+                    for chunk in stream_generate(
+                        self.mlx_model, self.mlx_tokenizer,
+                        prompt=prompt, max_tokens=max_tokens, **generation_options,
+                    ):
+                        pieces.append(chunk.text)
+                        last_chunk = chunk
+                    if last_chunk is None:
+                        raise ValueError("MLX model returned no output chunks")
+                    raw = "".join(pieces)
+                    finish_reason = last_chunk.finish_reason
+                    usage = {
+                        "prompt_tokens": last_chunk.prompt_tokens,
+                        "completion_tokens": last_chunk.generation_tokens,
+                    }
+                else:
+                    from mlx_lm import generate
+
+                    raw = generate(
+                        self.mlx_model, self.mlx_tokenizer,
+                        prompt=prompt, max_tokens=max_tokens, verbose=False,
+                    )
+                    finish_reason, usage = "unknown", None
+            else:
+                completion = self.gguf_model.create_chat_completion(
+                    messages=messages, max_tokens=self.MAX_TOKENS, **options
+                )
+                raw = completion["choices"][0]["message"]["content"]
+                finish_reason = completion["choices"][0].get("finish_reason", "unknown")
+                usage = completion.get("usage")
             if not isinstance(raw, str):
-                raise ValueError("GGUF model returned no text content")
+                raise ValueError(f"{backend} model returned no text content")
             if not tools_schema:
                 thoughts, separator, text = raw.partition("</think>")
                 if separator:
@@ -160,6 +249,11 @@ class LLM:
                     thoughts, text = "", raw
                 return {"raw": raw, "thoughts": thoughts, "text": text, "tool_calls": []}
             try:
+                if self.mlx_model is not None and finish_reason == "length":
+                    raise ValueError(
+                        f"MLX tool response reached the {max_tokens}-token output limit; "
+                        "incomplete tool calls will not be executed"
+                    )
                 result = json.loads(raw)
                 if (
                     not isinstance(result, dict)
@@ -167,7 +261,7 @@ class LLM:
                     or not isinstance(result.get("text"), str)
                     or not isinstance(result.get("tool_calls"), list)
                 ):
-                    raise ValueError("GGUF response must contain thoughts, text, and tool_calls")
+                    raise ValueError(f"{backend} response must contain thoughts, text, and tool_calls")
                 action_count = 0
                 progress_count = 0
                 for call in result["tool_calls"]:
@@ -178,28 +272,28 @@ class LLM:
                         or function["name"] not in names
                         or not isinstance(function.get("arguments"), dict)
                     ):
-                        raise ValueError("GGUF response contains an invalid tool call")
+                        raise ValueError(f"{backend} response contains an invalid tool call")
                     if function["name"] == "update_progress":
                         progress_count += 1
                     else:
                         action_count += 1
                 if action_count > 1 or progress_count > 1:
                     raise ValueError(
-                        "GGUF response must contain at most one browser action and one update_progress call"
+                        f"{backend} response must contain at most one browser action and one update_progress call"
                     )
                 return {**result, "raw": raw}
             except ValueError as error:
                 log(
-                    f"GGUF response parsing failed (attempt {attempt + 1}/{self.MAX_PARSE_ATTEMPTS}): "
-                    f"{error}; finish_reason={completion['choices'][0].get('finish_reason', 'unknown')!r}; "
-                    f"usage={completion.get('usage')!r}; max_tokens={self.MAX_TOKENS}; "
+                    f"{backend} response parsing failed (attempt {attempt + 1}/{self.MAX_PARSE_ATTEMPTS}): "
+                    f"{error}; finish_reason={finish_reason!r}; "
+                    f"usage={usage!r}; max_tokens={max_tokens}; "
                     f"response_chars={len(raw)}; response_tail (last 500 characters)={raw[-500:]!r}"
                 )
                 if attempt == self.MAX_PARSE_ATTEMPTS - 1:
                     raise
                 reason = (
                     "The previous response reached the output token limit before producing valid output. "
-                    if completion["choices"][0].get("finish_reason") == "length"
+                    if finish_reason == "length"
                     else f"The previous response was invalid: {error}. "
                 )
                 messages = [
@@ -216,7 +310,7 @@ class LLM:
                     },
                 ]
 
-        raise RuntimeError("GGUF response generation exhausted without returning or raising")
+        raise RuntimeError(f"{backend} response generation exhausted without returning or raising")
 
     def _generate_response(self, input_text, tools_schema):
         text = self.processor.apply_chat_template(

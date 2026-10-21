@@ -69,6 +69,21 @@ The left pane shows the page's ARIA tree; the right pane logs actions.
 Errors appear in a red bar. Use **Refresh** on the model-selection screen if
 you add a model after opening the app.
 
+### MLX models (Apple Silicon)
+
+On an Apple Silicon Mac, installing `requirements.txt` also installs `mlx-lm`
+and `lm-format-enforcer` for schema-constrained tool output. Re-run
+`pip install -r requirements.txt` when updating an existing environment.
+Place a complete MLX snapshot, such as `Ornith-1.5-9B-MLX-6bit`, in its own
+folder under `models/`. Click **Refresh**, select the folder, and open Boxxy.
+MLX models use the same preparation screen, objective discussion, and browser
+tools as other models; no `processor_config.json` is needed.
+
+MLX quantization metadata is detected automatically. For an unquantized MLX
+snapshot, include `mlx` as a hyphen- or underscore-separated part of the folder
+name (for example, `my-model-mlx`) to select the MLX backend explicitly.
+See [model support](docs/architecture.md#mlx-models) for required files and limits.
+
 ## Smoke test
 
 After setup, from the repository root:

@@ -1,4 +1,4 @@
-"""Check local Transformers snapshots and standalone GGUF models."""
+"""Check local Transformers/MLX snapshots and standalone GGUF models."""
 
 import json
 import re
@@ -6,6 +6,27 @@ import struct
 from pathlib import Path
 
 DEFAULT_MODELS_DIR = Path(__file__).resolve().parent.parent / "models"
+
+
+def is_mlx_model(path: Path) -> bool:
+    """Recognize MLX quantization metadata or an explicitly named MLX folder."""
+    config_path = path / "config.json"
+    if not config_path.is_file():
+        return False
+    with config_path.open(encoding="utf-8") as source:
+        config = json.load(source)
+    if not isinstance(config, dict):
+        return False
+    for name in ("quantization", "quantization_config"):
+        quantization = config.get(name)
+        if (
+            isinstance(quantization, dict)
+            and "bits" in quantization
+            and "group_size" in quantization
+            and "quant_method" not in quantization
+        ):
+            return True
+    return re.search(r"(?:^|[-_])mlx(?:[-_]|$)", path.name, re.IGNORECASE) is not None
 
 
 def gguf_files(path: Path) -> list[Path]:
@@ -54,7 +75,11 @@ def validate_model(path: Path) -> None:
         validate_gguf(gguf)
         return
 
-    for name in ("config.json", "processor_config.json", "tokenizer_config.json"):
+    mlx = is_mlx_model(path)
+    configs = ["config.json", "tokenizer_config.json"]
+    if not mlx:
+        configs.insert(1, "processor_config.json")
+    for name in configs:
         with (path / name).open(encoding="utf-8") as source:
             config = json.load(source)
         if not isinstance(config, dict) or not config:
@@ -68,12 +93,13 @@ def validate_model(path: Path) -> None:
     ):
         raise ValueError("Missing tokenizer data")
 
-    for name in ("model.safetensors", "pytorch_model.bin"):
+    weight_names = ("model.safetensors",) if mlx else ("model.safetensors", "pytorch_model.bin")
+    for name in weight_names:
         weights = path / name
         if weights.is_file() and weights.stat().st_size > 0:
             return
 
-    for name in ("model.safetensors.index.json", "pytorch_model.bin.index.json"):
+    for name in (f"{weight_name}.index.json" for weight_name in weight_names):
         index = path / name
         if not index.is_file():
             continue
@@ -91,7 +117,8 @@ def validate_model(path: Path) -> None:
             if not weights.is_file() or weights.stat().st_size == 0:
                 raise ValueError(f"Missing or empty weight shard: {shard}")
         return
-    raise ValueError("Missing model weights (Safetensors or PyTorch)")
+    raise ValueError("Missing model weights (Safetensors)" if mlx
+                     else "Missing model weights (Safetensors or PyTorch)")
 
 
 def discover_models(models_dir: Path) -> tuple[list[Path], list[str]]:

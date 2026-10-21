@@ -3,7 +3,7 @@
 ## Application flow
 
 `boxxy.py` opens the Tkinter interface in `modules/gui.py`. The model-selection
-screen lists complete local Transformers snapshots and standalone GGUF files in
+screen lists complete local Transformers/MLX snapshots and standalone GGUF files in
 the repository's `models/` directory, regardless of the current working
 directory. Each GGUF quantization is listed separately, including files one
 folder deep as `folder/filename.gguf`. **Refresh** rescans the directory;
@@ -11,7 +11,7 @@ folder deep as `folder/filename.gguf`. **Refresh** rescans the directory;
 
 The selected model loads in a background worker on a dedicated preparation
 screen, then generates a haiku about black box testing. The screen shows
-elapsed time and clearly labeled approximate progress/ETA. Neither backend
+elapsed time and clearly labeled approximate progress/ETA. None of the backends
 reports granular progress: estimates use initial budgets of 60 seconds to load
 and 30 seconds to generate. Progress stays below the phase boundary until the
 worker confirms completion, and an overrun is labeled rather than promising
@@ -33,7 +33,8 @@ Unsupported workflow edits are explicitly outside this first preset.
 
 **Discuss** uses the already-loaded model without browser tools. Refinement
 receives the current structured draft and at most six recent conversation
-messages, and can return one schema-constrained `propose_objective` call.
+messages, and can return one `propose_objective` call using the selected
+backend's tool-response format.
 Code validates the proposal; the UI displays a diff, requires **Apply
 proposal**, then **Approve objective** before **Start**. Editing invalidates
 approval. Refinement and execution cannot use the model concurrently.
@@ -102,6 +103,54 @@ Inference uses `llama-cpp-python`, the embedded chat template, a 32000-token
 context, and GPU offloading where supported. Architecture and chat-template
 compatibility are checked at load/generation time. Tool responses use
 schema-constrained JSON and are converted to Boxxy's usual response structure.
+
+### MLX models
+
+On macOS with Apple Silicon (`arm64`), `mlx-lm` loads MLX snapshots directly,
+including Ornith 1.5 9B MLX 6-bit. It is installed by `requirements.txt` on
+supported platforms; a missing dependency or unsupported platform produces an
+explicit load error.
+
+Discovery and loading recognize `quantization` or `quantization_config` objects
+with `bits` and `group_size` and without another backend's `quant_method`.
+An explicit hyphen- or underscore-separated `mlx` folder-name component also
+selects this backend, including for unquantized snapshots.
+
+A snapshot needs non-empty `config.json` (including `model_type`) and
+`tokenizer_config.json` objects, tokenizer data, and non-empty Safetensors
+weights. Sharded weights need an index referencing every shard.
+`processor_config.json` is not required. The tokenizer must provide a chat
+template, and the architecture must be supported by the installed MLX-LM
+version. This backend handles text only, not image/video inputs.
+
+Generation uses the snapshot's tokenizer/chat template with thinking disabled.
+Plain-text generation retains a 2048-token output limit; MLX tool generation
+has an 8192-token limit to accommodate structured responses and progress notes.
+MLX tool generation uses `lm-format-enforcer` to
+mask tokens that violate the same JSON response schema used by GGUF, including
+tool names and argument shapes. Tool generation uses temperature 0.2 rather
+than greedy decoding to reduce repetition. Its schema bounds all otherwise
+unbounded strings and arrays, not just `thoughts`: thoughts, intents, and each
+plan/done entry default to 120 characters; other strings default to 1024;
+arrays default to 15 items. Existing explicit schema limits (including objective
+URL/title limits and the tool-call count) are preserved. Generation disallows
+undeclared object fields, follows schema field order, and allows at most one
+consecutive whitespace character outside strings. These are generation
+constraints, not post-generation truncation or JSON repair.
+Tokenizer preprocessing is cached for the loaded model; every generation attempt
+gets a fresh schema parser. This preprocessing can make the first tool request
+slower. Both backends validate
+response shape, tool names, argument objects, and the one-action/one-progress
+limit. They make at most two attempts, logging malformed output before
+retrying or raising an error. MLX tool output is streamed internally so errors
+report the actual stop reason and prompt/completion token counts. A token-limit
+stop triggers the existing retry; if both attempts fail, an explicit output-limit
+error is raised and incomplete tool calls are never executed.
+Schema filtering does not prevent token-limit truncation or guarantee that a
+syntactically valid tool call selects the correct page element; these still
+produce explicit failures rather than guessed or repaired browser actions.
+Plain text and tool calls retain Boxxy's `raw`, `thoughts`, `text`, and
+`tool_calls` response fields.
 
 ## Downloading alternative models
 

@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from modules.gui import BoxxyGui
-from modules.models import discover_models, resolve_gguf, validate_model
+from modules.models import discover_models, is_mlx_model, resolve_gguf, validate_model
 
 
 class ModelDiscoveryTests(unittest.TestCase):
@@ -131,6 +131,57 @@ class ModelDiscoveryTests(unittest.TestCase):
         path = self.make_model()
         (path / "model.safetensors").rename(path / "pytorch_model.bin")
         validate_model(path)
+
+    def test_mlx_quantization_is_discovered_without_processor_config(self):
+        path = self.make_model()
+        (path / "processor_config.json").unlink()
+        for key in ("quantization", "quantization_config"):
+            with self.subTest(key=key):
+                (path / "config.json").write_text(json.dumps({
+                    "model_type": "qwen3_5",
+                    key: {"bits": 6, "group_size": 64, "mode": "affine"},
+                }), encoding="utf-8")
+                self.assertTrue(is_mlx_model(path))
+                self.assertEqual(discover_models(self.models_dir), ([path], []))
+
+    def test_explicit_mlx_name_supports_unquantized_snapshots(self):
+        for name in ("MLX-model", "model-mlx", "model_MLX_6bit"):
+            with self.subTest(name=name):
+                path = self.make_model(name)
+                (path / "processor_config.json").unlink()
+                self.assertTrue(is_mlx_model(path))
+                validate_model(path)
+        self.assertFalse(is_mlx_model(self.make_model("notmlx")))
+
+    def test_other_quantization_formats_still_require_processor_config(self):
+        path = self.make_model()
+        (path / "config.json").write_text(json.dumps({
+            "model_type": "qwen3_5",
+            "quantization_config": {"bits": 4, "group_size": 64, "quant_method": "awq"},
+        }), encoding="utf-8")
+        self.assertFalse(is_mlx_model(path))
+        (path / "processor_config.json").unlink()
+        with self.assertRaises(FileNotFoundError):
+            validate_model(path)
+
+    def test_mlx_still_requires_tokenizer_and_complete_safetensors_shards(self):
+        path = self.make_model("model-mlx")
+        (path / "processor_config.json").unlink()
+        (path / "model.safetensors").unlink()
+        (path / "pytorch_model.bin").write_bytes(b"weights")
+        with self.assertRaisesRegex(ValueError, "Missing model weights"):
+            validate_model(path)
+        (path / "model.safetensors.index.json").write_text(json.dumps({
+            "weight_map": {"a": "part1.safetensors", "b": "part2.safetensors"},
+        }), encoding="utf-8")
+        (path / "part1.safetensors").write_bytes(b"weights")
+        with self.assertRaisesRegex(ValueError, "Missing or empty weight shard: part2"):
+            validate_model(path)
+        (path / "part2.safetensors").write_bytes(b"weights")
+        self.assertEqual(discover_models(self.models_dir), ([path], []))
+        (path / "tokenizer.json").unlink()
+        with self.assertRaisesRegex(ValueError, "Missing tokenizer"):
+            validate_model(path)
 
     def test_sharded_weights_require_every_shard_inside_model_folder(self):
         path = self.make_model()
